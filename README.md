@@ -4,9 +4,13 @@ Example pipeline for training a model to draw glomerulus ROIs from existing
 per-z-slice ImageJ ROIs and responses to the diagnostic odor panel. It follows
 the approach in the "Glomerulus ROI segmentation: recommended approach" doc.
 
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then:
 ```
-pip install -r requirements.txt   # cellpose 4.x; training needs a GPU
+uv sync   # Python 3.13 env with cellpose 4.x; training needs a GPU
 ```
+Run the commands below with `uv run python ...`, or activate the env first. uv puts
+it in `./.venv`, or in `./venv` if `UV_PROJECT_ENVIRONMENT=venv` is set. Python 3.14
+won't work until antspyx ships wheels for it.
 
 ## Files
 

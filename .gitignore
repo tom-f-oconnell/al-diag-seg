@@ -4,3 +4,5 @@ synthetic_data/
 syn/
 syn_results/
 results/
+venv/
+.venv/

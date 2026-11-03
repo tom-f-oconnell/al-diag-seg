@@ -1,7 +1,0 @@
-numpy
-scipy
-scikit-image
-tifffile
-roifile
-cellpose>=4
-antspyx

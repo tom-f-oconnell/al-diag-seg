@@ -1,0 +1,16 @@
+[project]
+name = "al-diag-seg"
+version = "0.1.0"
+description = "Antennal lobe glomerulus segmentation from ImageJ ROIs and diagnostic odor panel responses"
+readme = "README.md"
+# antspyx (0.6.3) has no Python 3.14 wheels, and pins scipy<1.16, which has none either.
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "numpy",
+    "scipy",
+    "scikit-image",
+    "tifffile",
+    "roifile",
+    "cellpose>=4",
+    "antspyx",
+]
