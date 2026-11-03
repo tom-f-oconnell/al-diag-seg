@@ -52,6 +52,7 @@ class Atlas:
     prob: np.ndarray  # (K, Z, Y, X) float16, P(glomerulus k at voxel)
     names: list[str]
     spacing: tuple[float, float, float]
+    counts: np.ndarray | None = None  # (K,) number of flies behind each map
 
 
 def build_atlas(flies, spacing, reference: int = 0, transform: str = "SyN", smooth: float = 1.0) -> Atlas:
@@ -83,7 +84,7 @@ def build_atlas(flies, spacing, reference: int = 0, transform: str = "SyN", smoo
             acc[idx[name]] += m
             seen[idx[name]] += 1
     prob = acc / np.maximum(seen, 1)[:, None, None, None]
-    return Atlas(anat_sum / len(flies), prob.astype(np.float16), names, tuple(spacing))
+    return Atlas(anat_sum / len(flies), prob.astype(np.float16), names, tuple(spacing), seen)
 
 
 def atlas_to_fly(atlas: Atlas, anatomy, transform: str = "SyN") -> np.ndarray:

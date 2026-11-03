@@ -4,6 +4,11 @@ Each fly has ~16 glomeruli (Voronoi cells inside an ellipsoid), each with a
 fixed 24-odor tuning shared across flies (two pairs nearly identical),
 jittered positions, a random in-plane rotation and shift per fly, blur that
 mixes signal across borders, and per-slice ImageJ ROIs named by glomerulus.
+
+Also writes <out>/reference/, a fixed reference atlas (labels.tif + glomeruli.csv,
+the format of ~/src/al_atlas exports) from one more fake fly, mirrored and on a finer
+in-plane grid (2/3 um vs. the flies' 1 um), so aligning it needs a reflection and a
+scale.
 """
 import sys
 from pathlib import Path
@@ -66,7 +71,18 @@ def make_fly(seed):
             r.position = z + 1
             r.name = f"{NAMES[g]}_z{z + 1:02d}"  # zip entry names must be unique
             rois.append(r)
-    return anat.astype(np.float32), resp, rois
+    return anat.astype(np.float32), resp, rois, lab
+
+
+def write_reference(d: Path, seed: int = 999, zoom: float = 1.5):
+    lab = make_fly(seed)[3][:, :, ::-1]
+    lab = ndi.zoom(lab, (1, zoom, zoom), order=0)
+    d.mkdir(parents=True, exist_ok=True)
+    tifffile.imwrite(d / "labels.tif", lab.astype(np.uint8), imagej=True,
+                     resolution=(zoom, zoom), metadata={"spacing": 1.0, "unit": "um"})
+    with open(d / "glomeruli.csv", "w") as fh:
+        fh.write("label,glomerulus\n")
+        fh.writelines(f"{g + 1},{n}\n" for g, n in enumerate(NAMES))
 
 
 if __name__ == "__main__":
@@ -75,10 +91,12 @@ if __name__ == "__main__":
     for i in range(n):
         d = out / f"fly{i + 1:02d}"
         d.mkdir(parents=True, exist_ok=True)
-        anat, resp, rois = make_fly(100 + i)
+        anat, resp, rois, _ = make_fly(100 + i)
         tifffile.imwrite(d / "anatomy.tif", anat)
         tifffile.imwrite(d / "responses.tif", resp)
         zp = d / "RoiSet.zip"
         zp.unlink(missing_ok=True)
         roifile.roiwrite(zp, rois)
         print(d, len(rois), "ROIs")
+    write_reference(out / "reference")
+    print(out / "reference", "(reference atlas)")

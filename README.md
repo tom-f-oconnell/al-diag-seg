@@ -21,10 +21,11 @@ won't work until antspyx ships wheels for it.
 | `alseg/segment.py` | Builds per-slice training data (eroded ROI cores), fine-tunes Cellpose-SAM, predicts slice by slice and stitches into 3D. |
 | `alseg/refine.py` | `refine_with_prior`: refinement as energy minimization over voxel labels, with costs for tuning mismatch, `-log` atlas prior and neighbor disagreement (smoothness), solved by ICM. `refine_by_tuning`: the simpler tuning-only version: grows each ROI a little, then keeps only voxels that match its own tuning better than any neighbor's and are bright enough, and drops mixed border voxels. Also computes crosstalk metrics (coherence, neighbor tuning correlation, border leak). |
 | `alseg/atlas.py` | Probabilistic atlas: registers training flies to a reference (ANTsPy, Affine or SyN), averages each glomerulus's warped mask into a probability map, and warps the atlas into a new fly. |
+| `alseg/reference.py` | Adds a fixed reference atlas (labels only, e.g. Grabe et al. 2016 or hemibrain) to the training-fly atlas, aligned by its labels; see [below](#fixed-reference-atlases). |
 | `alseg/identity.py` | Builds a per-glomerulus template (tuning, position, shape) from labeled flies and names new ROIs. Cost = tuning + position + shape (Mahalanobis on log volume and axis lengths) + atlas overlap + layout (offsets to neighbors vs. template offsets, re-solved iteratively). Poor matches stay unassigned. |
 | `alseg/metrics.py` | IoU/Dice matching, precision/recall, split and merge counts. |
 | `run_pipeline.py` | All of the above, with held-out flies, writing label TIFFs, per-fly identity CSVs and `summary.csv`. |
-| `make_synthetic.py`, `smoke_test.py` | Fake flies in the expected layout, and a run of the pipeline with Cellpose swapped for a stand-in (`python make_synthetic.py syn 8 && python smoke_test.py`, no GPU needed). |
+| `make_synthetic.py`, `smoke_test.py` | Fake flies in the expected layout plus a fake reference atlas, and runs of the pipeline with Cellpose swapped for a stand-in: as is, with two glomeruli unlabeled in the training flies, and that plus the reference (`python make_synthetic.py syn 8 && python smoke_test.py`, no GPU needed). |
 
 ## Data layout
 
@@ -58,6 +59,35 @@ Synthetic results (2 held-out flies, 6-fly atlas, ROIs that overshoot by 2 px as
 Manual ROIs have leak ≈ 0.08. The prior keeps ROIs whole (higher recall and Dice), and pure tuning is stricter about borders. In identity matching, tuning alone swapped the two nearly identically tuned glomeruli, while any position term (centroid, atlas, or layout) fixed it; all terms together got 32/32. The synthetic data are too easy to tell those terms apart, so compare them on your flies.
 
 With 20–30 flies, hold out 4–5 flies per fold and rotate (5-fold over flies). Never split slices of the same fly between train and validation.
+
+## Fixed reference atlases
+
+`--ref` adds atlases from other sources to the one built from your training flies, e.g.
+the exports in [al_atlas](https://github.com/ejhonglab/al_atlas):
+```
+python run_pipeline.py data/ --val fly07 --spacing 2 0.5 0.5 --ref ~/src/al_atlas/grabe2016
+```
+A reference folder has `labels.tif` (voxel size in its ImageJ metadata) and one `.csv`
+with `label` and `glomerulus` columns, and optionally `side`.
+
+* **Alignment is by labels, not images.** An affine is fit to the centroids of
+  glomeruli named in both (needs ≥ 6; outliers are dropped and listed), then
+  `--ref-reg SyN` (default) registers the two sets of label maps. Your atlas is
+  already registered to each new fly, so the reference follows it. `--spacing`
+  must be right, since the fit is in µm.
+* **Side.** For a reference with both ALs, the side that fits better is used, mirrored
+  if needed (both are printed); `--ref-side` forces one.
+* **Glomeruli you never labeled** get their own atlas channels, and can be named from
+  position, layout and atlas overlap alone (tuning and shape costs set to a neutral
+  `unknown_cost`). Shared ones are averaged in as `--ref-weight` (default 1) extra flies.
+* **Names must match** after the same cleanup as ROI names (`DA4l` → `DA4L`). Atlases
+  differ in places: Grabe has VC3 and VP1 where the hemibrain has VC3l/m and VP1d/l/m.
+
+On synthetic data, with G03 and G11 unlabeled in the training flies, atlas-based
+naming got 28/32 ROIs right (0/4 of the two dropped glomeruli); with the reference, 32/32.
+Aligning the Grabe atlas to the hemibrain right AL (two different flies, in vivo vs.
+EM) left 5 µm median centroid error, and shared glomeruli overlapped with median
+Dice 0.46 after the affine and 0.63 after SyN.
 
 ## Things to check on your data
 

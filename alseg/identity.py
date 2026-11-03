@@ -109,12 +109,16 @@ def assign_identities(
     w_layout: float = 0.5,
     n_layout_iter: int = 3,
     max_cost: float = 0.6,
+    unknown_cost: float = 0.5,
 ):
     """Match predicted ROIs to template glomeruli.
 
     prior, prior_names : optional atlas warped into this fly
         (atlas.atlas_to_fly). Enables the atlas-overlap term and puts the
-        position and layout terms in registered coordinates.
+        position and layout terms in registered coordinates. Glomeruli in the
+        atlas but not the template (e.g. added from a fixed reference) are also
+        candidates, with their tuning and shape costs set to ``unknown_cost``
+        (on the 0-1 scale of the shape term; tuning cost 0.5 is corr 0.5).
     The total cost is divided by the sum of the active weights, so it is on
     the same scale whichever terms are on; pairs with cost > ``max_cost``
     are left unassigned instead of forced.
@@ -126,29 +130,35 @@ def assign_identities(
     feats = roi_features(responses, labels, sp)
     labs = list(feats)
     names = list(template)
-    nL, nN = len(labs), len(names)
 
     # positions: registered (atlas) if available, else relative to AL center
     if prior is not None:
         expected = atlas_centroids(prior, prior_names, sp)
         roi_pos = {l: np.array(center_of_mass(labels == l)) * sp for l in labs}
+        names += [n for n in prior_names if n not in template and n in expected]
     else:
         expected = {n: template[n]["centroid"] for n in names}
         roi_pos = {l: feats[l]["centroid"] for l in labs}
-    exp_pos = np.array([expected.get(n, template[n]["centroid"]) for n in names])
-    pos_sd = np.array([template[n]["centroid_sd"] for n in names])
+    nL, nN = len(labs), len(names)
+    default_sd = np.median([g["centroid_sd"] for g in template.values()])
+    exp_pos = np.array([expected.get(n, template.get(n, {}).get("centroid")) for n in names])
+    pos_sd = np.array([template[n]["centroid_sd"] if n in template else default_sd for n in names])
 
     base = np.zeros((nL, nN))
     for i, l in enumerate(labs):
         f = feats[l]
         for j, n in enumerate(names):
-            g = template[n]
-            r = np.corrcoef(f["tuning"], g["tuning"])[0, 1]
+            g = template.get(n)
             d = np.linalg.norm(roi_pos[l] - exp_pos[j]) / (pos_sd[j] + 1e-8)
-            s = np.sqrt(np.mean(((f["shape"] - g["shape"]) / g["shape_sd"]) ** 2))
-            base[i, j] = (w_tuning * (1 - r)
+            if g is None:
+                tuning_cost = shape_cost = unknown_cost
+            else:
+                tuning_cost = 1 - np.corrcoef(f["tuning"], g["tuning"])[0, 1]
+                s = np.sqrt(np.mean(((f["shape"] - g["shape"]) / g["shape_sd"]) ** 2))
+                shape_cost = min(s, 4.0) / 4.0
+            base[i, j] = (w_tuning * tuning_cost
                           + w_position * min(d, 4.0) / 4.0
-                          + w_shape * min(s, 4.0) / 4.0)
+                          + w_shape * shape_cost)
     if prior is not None and w_atlas:
         pidx = {n: k for k, n in enumerate(prior_names)}
         for i, l in enumerate(labs):

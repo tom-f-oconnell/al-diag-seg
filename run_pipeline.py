@@ -16,10 +16,13 @@ Steps: ROIs -> labels; response channels; Cellpose fine-tune; then for each
 held-out fly: predict, refine by tuning alone, and (unless --no-atlas)
 refine with an anatomical prior from a probabilistic atlas of the training
 flies, and name ROIs using tuning + position + shape + layout + atlas.
+--ref adds fixed reference atlases (labels only, e.g. ~/src/al_atlas/grabe2016) to
+that atlas, including glomeruli none of the training flies have labels for.
 
 Usage:
     python run_pipeline.py data/ --val fly07 fly13 --out results/ --epochs 200
     python run_pipeline.py data/ --val fly07 --skip-train --model results/models/al_glomeruli
+    python run_pipeline.py data/ --val fly07 --spacing 2 0.5 0.5 --ref ~/src/al_atlas/grabe2016
 """
 from __future__ import annotations
 
@@ -31,7 +34,7 @@ from pathlib import Path
 import numpy as np
 import tifffile
 
-from alseg import atlas, identity, metrics, refine, responses, roi_io, segment
+from alseg import atlas, identity, metrics, reference, refine, responses, roi_io, segment
 
 
 def load_fly(d: Path, name_table=None):
@@ -58,7 +61,17 @@ def main():
     ap.add_argument("--no-atlas", action="store_true", help="skip the anatomical prior")
     ap.add_argument("--reg", default="SyN", help="ANTs transform: Affine or SyN")
     ap.add_argument("--w-prior", type=float, default=0.5, help="weight of the atlas prior in refinement")
+    ap.add_argument("--ref", type=Path, nargs="+", default=[],
+                    help="fixed reference atlas folders (labels.tif + a .csv) to add to the atlas; "
+                         "needs the right --spacing")
+    ap.add_argument("--ref-side", help="side of a two-sided reference to use (default: best fit)")
+    ap.add_argument("--ref-reg", default="SyN",
+                    help="Affine (glomerulus centroid fit) or SyN (then label-map registration)")
+    ap.add_argument("--ref-weight", type=float, default=1.0,
+                    help="how many training flies a reference counts as, for glomeruli in both")
     a = ap.parse_args()
+    if a.ref and a.no_atlas:
+        ap.error("--ref needs the atlas (drop --no-atlas)")
     a.out.mkdir(parents=True, exist_ok=True)
 
     dirs = sorted(p for p in a.data.iterdir() if (p / "RoiSet.zip").exists())
@@ -89,6 +102,14 @@ def main():
     if not a.no_atlas:
         print("building atlas ...")
         atl = atlas.build_atlas(train_f, a.spacing, transform=a.reg)
+        for r in a.ref:
+            atl, info = reference.add_best_side(atl, r, a.ref_side, transform=a.ref_reg,
+                                                weight=a.ref_weight)
+            print(f"reference {r} ({info['side'] or 'one side'}{', mirrored' if info['mirrored'] else ''}): "
+                  f"{info['n_shared']} glomeruli shared, centroid residual median "
+                  f"{info['residual_median_um']:.1f} um, max {info['residual_max_um']:.1f} um"
+                  + (f", left out of fit: {' '.join(info['rejected'])}" if info["rejected"] else "")
+                  + f"; added {len(info['added'])}: {' '.join(info['added'])}")
 
     rows, id_rows = [], []
     for f in val_f:
