@@ -70,10 +70,8 @@ python run_pipeline.py data/ --val fly07 --spacing 2 0.5 0.5 --ref ~/src/al_atla
 A reference folder has `labels.tif` (voxel size in its ImageJ metadata) and one `.csv`
 with `label` and `glomerulus` columns, and optionally `side`.
 
-This is not the preferred way to get priors. Labeling those glomeruli in more of your
-own flies is better, since that also gives priors from your own preparation, and tuning
-templates. In practice only `grabe2016` is worth using: several hemibrain meshes in that
-export are fragments.
+Of the al_atlas exports, `grabe2016` is the better one: several hemibrain meshes in
+that export are fragments.
 
 * **Alignment is by labels, not images.** An affine is fit to the centroids of
   glomeruli named in both (needs ≥ 6; outliers are dropped and listed), then

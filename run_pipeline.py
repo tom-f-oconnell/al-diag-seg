@@ -58,7 +58,7 @@ examples:
   python run_pipeline.py data/ --val fly07 --no-atlas
 
   # also take glomeruli none of the training flies have labels for from the
-  # Grabe et al. 2016 atlas (not preferred, see --ref)
+  # Grabe et al. 2016 atlas (see --ref)
   python run_pipeline.py data/ --val fly07 --spacing 2 0.5 0.5 --ref ~/src/al_atlas/grabe2016
 """
 
@@ -115,20 +115,18 @@ def main():
                         "drops ROIs.")
 
     g = ap.add_argument_group(
-        "fixed reference atlases (not preferred)",
-        "Priors for glomeruli your training flies have no labels for, from another source.\n"
-        "Labeling those glomeruli in more of your own flies is better: that gives priors\n"
-        "from your own preparation, and tuning templates, neither of which a reference has.")
+        "fixed reference atlases",
+        "Priors (and names) for glomeruli your training flies have no labels for, from another\n"
+        "source.")
     g.add_argument("--ref", type=Path, nargs="+", default=[], metavar="FOLDER",
                    help="reference atlas folders to add to the training-fly atlas, each with "
                         "labels.tif (voxel size in its ImageJ metadata) and one .csv with 'label' and "
                         "'glomerulus' columns (and optionally 'side'), as exported by "
-                        "~/src/al_atlas. Not preferred, and in practice only "
-                        "~/src/al_atlas/grabe2016: a reference is one other fly, aligned only "
-                        "through the glomeruli named in both (needs >= 6), so its priors are "
-                        "rougher than your own flies' (Grabe aligned to hemibrain: 5 um median "
-                        "centroid error, median Dice 0.63), and several hemibrain meshes in "
-                        "~/src/al_atlas/hemibrain are fragments. Glomeruli only in the reference "
+                        "~/src/al_atlas. Of those, grabe2016 is the better one: several "
+                        "hemibrain meshes in ~/src/al_atlas/hemibrain are fragments. A reference "
+                        "is aligned through the glomeruli named in both it and the atlas (needs "
+                        ">= 6; Grabe aligned to hemibrain: 5 um median centroid error, median "
+                        "Dice 0.63 for shared glomeruli). Glomeruli only in the reference "
                         "get named from position, layout and atlas overlap alone. Needs a correct "
                         "--spacing, and names that match your ROI names after the same cleanup "
                         "(e.g. DA4l -> DA4L). Default: no reference.")
