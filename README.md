@@ -33,8 +33,8 @@ won't work until antspyx ships wheels for it.
 
 ## Data
 
-Download it from the database's ROI training tab (with the anatomical stacks, ideally),
-unzip it, and give its folder:
+Download it from the database's ROI training tab (keeping the anatomical stacks, in it
+unless unticked: flies register to each other through them), unzip it, and give its folder:
 ```
 python run_pipeline.py olfdb_roi_training_2026-11-04/ --val Tom_2023-11-19_1 Sam_2026-03-31_1 --out results/
 ```
