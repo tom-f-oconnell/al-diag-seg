@@ -1,28 +1,34 @@
 #!/usr/bin/env python3
 """End-to-end example: ImageJ ROIs + odor responses -> trained model -> named, refined ROIs.
 
-Expected layout (one folder per fly; folders without RoiSet.zip are skipped):
+Input: an export from the odor response database (hong-data, its ROI training tab),
+unzipped. It has every file where it is on tensor, as al_analysis leaves it, and
+roi_training.json, saying which is what; per fly:
 
-    data/
-      fly01/
-        anatomy.tif       (Z, Y, X)           mean or baseline fluorescence
-        responses.tif     (n_odors, Z, Y, X)  mean dF/F per odor, same grid
-        RoiSet.zip        ImageJ ROIs, one per glomerulus per z-slice
-        Experiment.xml    optional: ThorImage metadata of that recording
-        hires/            optional: higher resolution anatomical stack of the same fly
-          anatomy.tif     (Z, Y, X)
-          Experiment.xml  its ThorImage metadata (required if the fly has one above)
-      fly02/ ...
+    <its folder in the motion-corrected data>/
+      <diagnostic recording>/trialmean_dff.tif            (n_odors, Z, Y, X) mean dF/F per odor
+      <diagnostic recording>/trial_frames_and_odors.json  each trial's odor
+      <one of those>/RoiSet.zip                           ImageJ ROIs, one per glomerulus per plane
+      mocorr_concat_avg.tif                               (Z, Y, X) mean of its motion-corrected movie
+    <its folder in the raw data>/
+      <diagnostic recording>/Experiment.xml               ThorImage metadata: voxel sizes
+      anat/                                               optional: its anatomical stack, as recorded
 
-If you have raw movies instead of responses.tif, compute it with
-alseg.responses.response_vectors_from_movie(movie, onsets).
+A fly's responses are its diagnostic recordings' one after another, put in one order
+for every fly by odor (named alike in every fly by the database), keeping the odors
+every fly has. Only glomeruli are trained on, as the database tells them apart: ROIs
+named as one (or several joined by /, that could not be told apart), and tentative ones
+(DA1_t0) as that glomerulus, unless the fly also has an ROI of it without the mark; not
+numbered ROIs, nor names ending in + or ? (see --no-tentative).
+Voxel sizes come from the Experiment.xml files. Flies can have different voxel sizes,
+and planes can be much further apart than pixels: geometry is in um, the model sees
+every fly at one in-plane pixel size (--xy-um), and registration is in physical space,
+through each fly's anatomical stack if it has one (see design.md). Stacks are as
+recorded, but al_analysis mirrors right ALs' functional data left-right, so each stack
+is placed both ways, and kept the way that fits better.
 
-Voxel sizes come from the Experiment.xml files if there are any (then every fly needs
-one, and --spacing and --hires-spacing are not allowed), otherwise from --spacing and
---hires-spacing. Flies can have different voxel sizes, and planes can be much further
-apart than pixels: geometry is in um, the model sees every fly at one in-plane pixel
-size (--xy-um), and registration is in physical space, through each fly's hires/ stack
-if it has one (see design.md).
+Flies are named <top folder of their data on tensor>_<date>_<fly number>, e.g.
+Tom_2023-11-19_1 (as --val takes them).
 
 Steps: ROIs -> labels; response channels; Cellpose fine-tune; then for each
 held-out fly: predict, refine by tuning alone, and (unless --no-atlas) refine
@@ -45,50 +51,7 @@ from pathlib import Path
 import numpy as np
 import tifffile
 
-from alseg import atlas, identity, metadata, metrics, reference, refine, responses, roi_io, segment
-
-
-def load_fly(d: Path, name_table=None, spacing=None, hires_spacing=None):
-    """One fly folder. Voxel sizes come from its Experiment.xml files if it has
-    them, otherwise from ``spacing`` (default 1 um) and ``hires_spacing``."""
-    anat = tifffile.imread(d / "anatomy.tif").astype(np.float32)
-    resp = tifffile.imread(d / "responses.tif").astype(np.float32)
-    assert resp.shape[1:] == anat.shape, f"{d}: responses {resp.shape} vs anatomy {anat.shape}"
-    labels, lut, overlap = roi_io.load_roiset(d / "RoiSet.zip", anat.shape, name_table)
-    xml = metadata.has_xml(d)
-    f = {"name": d.name, "anatomy": anat, "responses": resp, "labels": labels, "lut": lut,
-         "overlap": overlap,
-         "spacing": (metadata.thorimage_spacing(d / "Experiment.xml", anat.shape) if xml
-                     else tuple(float(x) for x in (spacing or (1, 1, 1))))}
-    if (d / "hires" / "anatomy.tif").exists():
-        h = tifffile.imread(d / "hires" / "anatomy.tif").astype(np.float32)
-        hs = (metadata.thorimage_spacing(d / "hires" / "Experiment.xml", h.shape) if xml
-              else tuple(float(x) for x in hires_spacing))
-        f["hires"] = {"anatomy": h, "spacing": hs}
-    return f
-
-
-def check_voxel_size_sources(dirs, a, error):
-    """Experiment.xml for every fly (and hires/ stack) or for none, and no
-    --spacing/--hires-spacing with them."""
-    with_xml = [d.name for d in dirs if metadata.has_xml(d)]
-    hires = [d for d in dirs if (d / "hires" / "anatomy.tif").exists()]
-    if with_xml:
-        missing = [d.name for d in dirs if not metadata.has_xml(d)]
-        if missing:
-            error(f"Experiment.xml is missing for {' '.join(missing)}; when any fly has one, all must")
-        if a.spacing is not None or a.hires_spacing is not None:
-            error("--spacing and --hires-spacing can't be used with Experiment.xml files, "
-                  "which give the voxel sizes")
-        missing = [d.name for d in hires if not metadata.has_xml(d / "hires")]
-        if missing:
-            error(f"hires/Experiment.xml is missing for {' '.join(missing)}")
-    else:
-        if hires and a.hires_spacing is None:
-            error(f"{' '.join(d.name for d in hires)} have hires/ stacks: give their voxel size "
-                  "with --hires-spacing (or use Experiment.xml files)")
-        if a.spacing is None:
-            print("no Experiment.xml files or --spacing: assuming 1 um voxels")
+from alseg import atlas, identity, metrics, olfdb, reference, refine, responses, roi_io, segment
 
 
 def model_xy_um(model_path) -> float | None:
@@ -98,24 +61,19 @@ def model_xy_um(model_path) -> float | None:
 
 EXAMPLES = """\
 examples:
-  # train on all flies but three, and evaluate on those three. With Experiment.xml
-  # files in the fly folders, voxel sizes come from those.
-  python run_pipeline.py data/ --val fly07 fly13 fly21
-
-  # without Experiment.xml files, give voxel sizes (z y x, in um), including for any
-  # hires/ stacks
-  python run_pipeline.py data/ --val fly07 --spacing 10 0.6 0.6 --hires-spacing 2 0.4 0.4
+  # train on all flies of an export but three, and evaluate on those three
+  python run_pipeline.py olfdb_roi_training_2026-11-04/ --val Tom_2023-11-19_1 Sam_2026-03-31_1 Sam_2026-03-31_2
 
   # reuse a trained model instead of training again
-  python run_pipeline.py data/ --val fly07 --skip-train --model results/models/al_glomeruli
+  python run_pipeline.py data/ --val Tom_2023-11-19_1 --skip-train --model results/models/al_glomeruli
 
   # without a GPU and with a faster (affine-only) atlas, or without the atlas
-  python run_pipeline.py data/ --val fly07 --cpu --reg Affine
-  python run_pipeline.py data/ --val fly07 --no-atlas
+  python run_pipeline.py data/ --val Tom_2023-11-19_1 --cpu --reg Affine
+  python run_pipeline.py data/ --val Tom_2023-11-19_1 --no-atlas
 
   # also take glomeruli none of the training flies have labels for from the
   # Grabe et al. 2016 atlas (see --ref)
-  python run_pipeline.py data/ --val fly07 --ref ~/src/al_atlas/grabe2016
+  python run_pipeline.py data/ --val Tom_2023-11-19_1 --ref ~/src/al_atlas/grabe2016
 """
 
 
@@ -133,23 +91,18 @@ class _HelpFormatter(argparse.RawDescriptionHelpFormatter, argparse.ArgumentDefa
 def main():
     ap = argparse.ArgumentParser(description=__doc__, epilog=EXAMPLES, formatter_class=_HelpFormatter)
     ap.add_argument("data", type=Path,
-                    help="folder with one subfolder per fly, laid out as above")
+                    help="an export from the odor response database's ROI training tab, unzipped: "
+                         "the folder with its roi_training.json")
     ap.add_argument("--val", nargs="+", required=True, metavar="FLY",
-                    help="names of the fly folders to hold out. They are left out of training, the "
+                    help="names of the flies to hold out (e.g. Tom_2023-11-19_1). They are left out of training, the "
                          "identity template and the atlas, and scored against their manual ROIs. "
                          "Cellpose also uses them as its validation set while training. Required.")
     ap.add_argument("--out", type=Path, default=Path("results"), metavar="DIR",
                     help="output folder, created if needed")
-
-    g = ap.add_argument_group(
-        "voxel sizes",
-        "Only without Experiment.xml files; with them, these are errors.")
-    g.add_argument("--spacing", type=float, nargs=3, metavar=("Z", "Y", "X"),
-                   help="voxel size in um of the functional recordings (anatomy.tif, "
-                        "responses.tif), the same for every fly. Default: 1 1 1, with a warning.")
-    g.add_argument("--hires-spacing", type=float, nargs=3, metavar=("Z", "Y", "X"),
-                   help="voxel size in um of the hires/anatomy.tif stacks, the same for every fly. "
-                        "Required if any fly has one.")
+    ap.add_argument("--no-tentative", action="store_true",
+                    help="leave out tentative ROIs (named as a glomerulus but for a _t<n> suffix, "
+                         "e.g. DA1_t0), which are otherwise trained on as that glomerulus where the "
+                         "fly has no ROI of it without the mark")
 
     g = ap.add_argument_group("segmentation model")
     g.add_argument("--epochs", type=int, default=200, metavar="N", help="Cellpose fine-tuning epochs")
@@ -178,10 +131,10 @@ def main():
                         "or SyN (affine then deformable, for glomerulus layouts that differ between "
                         "flies), or another ANTsPy type_of_transform")
     g.add_argument("--hires-reg", default="Rigid", choices=["Rigid", "Similarity", "Affine"],
-                   help="ANTs transform placing a fly's functional planes in its own hires/ stack")
+                   help="ANTs transform placing a fly's functional planes in its own anatomical stack")
     g.add_argument("--atlas-um", type=float, default=1.0, metavar="UM",
                    help="finest voxel size of the atlas grid, which is one training fly's "
-                        "registration image (its hires/ stack if it has one, the most finely "
+                        "registration image (its anatomical stack if it has one, the most finely "
                         "sampled in z) coarsened to this")
     g.add_argument("--w-prior", type=float, default=0.5, metavar="W",
                    help="weight of the atlas prior relative to odor tuning in refinement. Higher "
@@ -222,20 +175,29 @@ def main():
     if a.skip_train and a.model is None:
         ap.error("--skip-train needs --model")
 
-    dirs = sorted(p for p in a.data.iterdir() if (p / "RoiSet.zip").exists())
-    check_voxel_size_sources(dirs, a, ap.error)
+    if not olfdb.is_export(a.data):
+        ap.error(f"{a.data} has no {olfdb.MANIFEST}: give the folder of an unzipped export from the "
+                 "database's ROI training tab")
+    entries = olfdb.fly_entries(a.data)
+    names = [olfdb.fly_name(e) for e in entries]
+    unknown = [v for v in a.val if v not in names]
+    if unknown:
+        ap.error(f"--val: no fly {' '.join(unknown)} in the export (its flies: {' '.join(names)})")
     a.out.mkdir(parents=True, exist_ok=True)
-    shapes = [tifffile.TiffFile(d / "anatomy.tif").series[0].shape for d in dirs]
-    name_table = roi_io.build_name_table([d / "RoiSet.zip" for d in dirs], shapes)
+    keep = olfdb.roi_keeper(set(olfdb.manifest(a.data)["glomeruli"]), tentative=not a.no_tentative)
+    name_table = roi_io.build_name_table([a.data / e["roiset"] for e in entries], [tuple(e["shape"]) for e in entries],
+                                         keep=keep)
     (a.out / "name_table.json").write_text(json.dumps(name_table, indent=1))
-    flies = [load_fly(d, name_table, a.spacing, a.hires_spacing) for d in dirs]
+    flies = [olfdb.load(a.data, e, name_table, keep) for e in entries]
+    odors = olfdb.align_odors(flies)
     train_f = [f for f in flies if f["name"] not in a.val]
     val_f = [f for f in flies if f["name"] in a.val]
-    print(f"{len(train_f)} training flies, {len(val_f)} held out, {len(name_table)} glomerulus names")
+    print(f"{len(train_f)} training flies, {len(val_f)} held out, {len(name_table)} glomerulus names, "
+          f"{len(odors)} odors in every fly")
     for f in flies:
         h = f.get("hires")
         print(f"  {f['name']}: voxels (z, y, x) {np.round(f['spacing'], 3).tolist()} um"
-              + (f", hires/ {np.round(h['spacing'], 3).tolist()} um" if h else ""))
+              + (f", anatomical stack {np.round(h['spacing'], 3).tolist()} um" if h else ""))
 
     # Shared PCA basis on training flies only (inside the AL, i.e. labeled voxels)
     pca = responses.SharedPCA(3).fit([f["responses"] for f in train_f],
@@ -259,6 +221,11 @@ def main():
     template = identity.build_template(train_f)
     atl = None
     if not a.no_atlas:
+        for f in flies:
+            if f.get("hires") and f["hires"]["mirror"] is None:
+                mirrored, scores = atlas.orient_hires(f, a.hires_reg)
+                print(f"  {f['name']}: anatomical stack {'mirrored left-right' if mirrored else 'as recorded'} "
+                      f"(fit as recorded {scores[0]:.3f}, mirrored {scores[1]:.3f}; lower is better)")
         print("building atlas ...")
         atl = atlas.build_atlas(train_f, transform=a.reg, hires_transform=a.hires_reg,
                                 atlas_um=a.atlas_um)

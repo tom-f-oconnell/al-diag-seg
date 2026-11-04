@@ -58,8 +58,11 @@ def load_roiset(
     name_to_label: dict[str, int] | None = None,
     link_unnamed: bool | None = None,
     min_link_iou: float = 0.2,
+    keep=None,
 ) -> tuple[np.ndarray, dict[int, str], np.ndarray]:
-    """Read a RoiSet.zip (or single .roi) into a label volume.
+    """Read a RoiSet.zip (or single .roi) into a label volume. ``keep``: if given, only the
+    ROIs it says to keep, by ``keep(name, names)``: an ROI's name as in the RoiSet, and the
+    names of all of them (see `alseg.olfdb.roi_keeper`).
 
     Returns
     -------
@@ -75,6 +78,9 @@ def load_roiset(
     if link_unnamed is None:
         link_unnamed = all(_DEFAULT_NAME.match(r.name or "") for r in rois)
 
+    if keep is not None:
+        names = {r.name or "" for r in rois}
+        rois = [r for r in rois if keep(r.name or "", names)]
     # (name, z, mask) per ROI
     items = []
     for r in rois:
@@ -138,10 +144,10 @@ def _link_by_overlap(items, min_iou):
     return [(f"obj{find(i):04d}", z, m) for i, (_, z, m) in enumerate(items)]
 
 
-def build_name_table(roi_paths, shapes) -> dict[str, int]:
-    """One fixed glomerulus-name -> label table shared by all flies."""
+def build_name_table(roi_paths, shapes, keep=None) -> dict[str, int]:
+    """One fixed glomerulus-name -> label table shared by all flies (``keep``: as in `load_roiset`)."""
     names = set()
     for p, s in zip(roi_paths, shapes):
-        _, lut, _ = load_roiset(p, s)
+        _, lut, _ = load_roiset(p, s, keep=keep)
         names |= set(lut.values())
     return {n: i + 1 for i, n in enumerate(sorted(names))}

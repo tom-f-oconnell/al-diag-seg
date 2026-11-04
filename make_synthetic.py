@@ -1,4 +1,5 @@
-"""Write fake flies in the layout run_pipeline.py expects, for testing.
+"""Write fake flies as an export from the odor response database (hong-data's ROI training
+tab), which run_pipeline.py reads, for testing.
 
 Each fly is defined in um: ~16 glomeruli (Voronoi cells inside an ellipsoidal AL about
 100 x 85 x 75 um), each with a fixed 24-odor tuning shared across flies (two pairs
@@ -6,8 +7,13 @@ nearly identical), jittered positions, and a random pose per fly (in-plane rotat
 and shifts, including of the planes in depth). Functional recordings are sampled like
 ours: 8-12 planes 8-12 um apart and 0.9-1.2 um pixels, with blur that mixes signal
 across borders, and per-plane ImageJ ROIs named by glomerulus. Odd-numbered flies also
-get a hires/ anatomical stack (3 um planes, 1.2 um pixels) with its own field of view.
-Every recording gets a minimal ThorImage Experiment.xml with its voxel size.
+get an anatomical stack (3 um planes, 1.2 um pixels) with its own field of view, as
+ThorImage writes it (ChanA_*.tif, two frames per plane), and as recorded: flies 3 and 7 are
+right ALs, whose functional data al_analysis mirrored left-right, so their stacks are
+mirrored relative to it. Each fly's 24 odors are split between two diagnostic recordings,
+in an order of its own; fly 4 has no odor24. Each RoiSet also has a numbered ROI (not to
+be trained on) and its G16 is tentative (G16_t0) in fly 2, and in fly 5 next to a G16 too. Every recording gets a minimal ThorImage Experiment.xml with its
+voxel size, in the fly's raw data folder.
 
 Also writes <out>/reference/, a fixed reference atlas (labels.tif + glomeruli.csv,
 the format of ~/src/al_atlas exports) from one more fake fly, mirrored and on another
@@ -15,6 +21,7 @@ grid, so aligning it needs a reflection and a scale.
 
 Usage: python make_synthetic.py OUT [N_FLIES]
 """
+import json
 import sys
 from pathlib import Path
 
@@ -27,6 +34,10 @@ from skimage.measure import find_contours
 N_GLOM, N_ODORS = 16, 24
 AL_RADII = np.array([38.0, 42.0, 50.0])  # (z, y, x) um
 HIRES_SHAPE, HIRES_SPACING = (36, 112, 112), (3.0, 1.2, 1.2)
+USER, DATE = "Ann", "2026-01-01"  # whose data the flies are (the top folder of their paths), and when
+RECORDINGS = (("diagnostics1", range(0, 12)), ("diagnostics2", range(12, 24)))
+ODORS = [f"odor{i + 1:02d} @ -3" for i in range(N_ODORS)]
+RIGHT_ALS = (3, 7)  # flies whose functional data al_analysis mirrored (their stacks are not)
 rng0 = np.random.default_rng(0)
 TUNING = np.clip(rng0.normal(0, 1, (N_GLOM, N_ODORS)), 0, None) ** 1.5  # sparse, positive
 # G15/G16 and G13/G14 are tuned almost alike, so tuning alone confuses them
@@ -77,7 +88,21 @@ def write_xml(path: Path, shape, spacing):
 """)
 
 
-def write_fly(d: Path, seed: int, hires: bool):
+def write_stack(d: Path, stack, rng):
+    """An anatomical stack as ThorImage writes it: one TIFF per frame, two frames per plane."""
+    d.mkdir(parents=True, exist_ok=True)
+    frame = 0
+    for z, plane in enumerate(stack):
+        for _ in range(2):
+            frame += 1
+            tifffile.imwrite(d / f"ChanA_0001_0001_{z + 1:04d}_{frame:04d}.tif",
+                             np.clip((plane + rng.normal(0, 0.02, plane.shape)) * 1000, 0, None).astype(np.uint16))
+    write_xml(d / "Experiment.xml", stack.shape, HIRES_SPACING)
+
+
+def write_fly(out: Path, num: int, seed: int, hires: bool) -> dict:
+    """One fly, where al_analysis leaves its files (in the folders of its motion-corrected
+    and raw data); its entry in the export's roi_training.json."""
     rng = np.random.default_rng(seed)
     fly = fly_model(seed)
     nz, dz, dxy = int(rng.integers(8, 13)), round(rng.uniform(8, 12), 3), round(rng.uniform(0.9, 1.2), 3)
@@ -99,21 +124,50 @@ def write_fly(d: Path, seed: int, hires: bool):
             r = roifile.ImagejRoi.frompoints(c[:, ::-1])  # (x, y)
             r.roitype = roifile.ROI_TYPE.POLYGON
             r.position = z + 1
-            r.name = f"{NAMES[g]}_z{z + 1:02d}"  # zip entry names must be unique
+            r.name = NAMES[g] + ("_t0" if g == N_GLOM - 1 and num in (2, 5) else "")
             rois.append(r)
+            if g == N_GLOM - 1 and num == 5:  # a plain G16 too, so the tentative one is left out
+                plain = roifile.ImagejRoi.frompoints(c[:, ::-1])
+                plain.roitype, plain.position, plain.name = roifile.ROI_TYPE.POLYGON, z + 1, NAMES[g]
+                rois.append(plain)
+    numbered = roifile.ImagejRoi.frompoints(np.array([[10, 10], [30, 10], [30, 30], [10, 30]]))
+    numbered.roitype, numbered.position, numbered.name = roifile.ROI_TYPE.POLYGON, 1, "12"
+    rois.append(numbered)
 
-    d.mkdir(parents=True, exist_ok=True)
-    tifffile.imwrite(d / "anatomy.tif", anatomy(lab, gaps, spacing, rng))
-    tifffile.imwrite(d / "responses.tif", resp.astype(np.float32))
-    (d / "RoiSet.zip").unlink(missing_ok=True)
-    roifile.roiwrite(d / "RoiSet.zip", rois)
-    write_xml(d / "Experiment.xml", shape, spacing)
+    rel = lambda p: p.relative_to(out).as_posix()  # noqa: E731
+    adir, rdir = out / USER / "analysis" / DATE / str(num), out / USER / "raw" / DATE / str(num)
+    adir.mkdir(parents=True, exist_ok=True)
+    tifffile.imwrite(adir / "mocorr_concat_avg.tif", anatomy(lab, gaps, spacing, rng), imagej=True, metadata={"axes": "ZYX"})
+    recordings = []
+    for name, odors in RECORDINGS:
+        odors = [i for i in rng.permutation(list(odors)) if not (num == 4 and i == N_ODORS - 1)]
+        (adir / name).mkdir(exist_ok=True)
+        tifffile.imwrite(adir / name / "trialmean_dff.tif", resp[odors].astype(np.float32), imagej=True,
+                         metadata={"axes": "TZYX"})
+        trials = [{"start_frame": 0, "first_odor_frame": 1, "end_frame": 2, "odors": ODORS[i], "name": ODORS[i].split()[0],
+                   "log10_conc": -3} for i in odors for _ in range(2)]
+        (adir / name / "trial_frames_and_odors.json").write_text(json.dumps(trials))
+        (rdir / name).mkdir(parents=True, exist_ok=True)
+        write_xml(rdir / name / "Experiment.xml", shape, spacing)
+        recordings.append({"name": name, "responses": rel(adir / name / "trialmean_dff.tif"),
+                           "trials": rel(adir / name / "trial_frames_and_odors.json"),
+                           "experiment_xml": rel(rdir / name / "Experiment.xml"),
+                           "odors": [ODORS[i] for i in odors], "as_recorded": [ODORS[i] for i in odors]})
+    roiset = adir / RECORDINGS[0][0] / "RoiSet.zip"
+    roiset.unlink(missing_ok=True)
+    # ImageJ's zip entry names (unique), as the ROIs' own names repeat on each plane
+    roifile.roiwrite(roiset, rois, name=[f"{r.position:04d}-{i:04d}" for i, r in enumerate(rois)])
+    stacks = []
     if hires:
         hl, hg = sample(fly, HIRES_SHAPE, HIRES_SPACING, rng.uniform(-5, 5, 3))
-        (d / "hires").mkdir(exist_ok=True)
-        tifffile.imwrite(d / "hires" / "anatomy.tif", anatomy(hl, hg, HIRES_SPACING, rng, 0.03))
-        write_xml(d / "hires" / "Experiment.xml", HIRES_SHAPE, HIRES_SPACING)
-    return len(rois), spacing
+        stack = anatomy(hl, hg, HIRES_SPACING, rng, 0.03)
+        write_stack(rdir / "anat", stack[..., ::-1] if num in RIGHT_ALS else stack, rng)
+        stacks.append({"name": "anat", "dir": rel(rdir / "anat"), "experiment_xml": rel(rdir / "anat" / "Experiment.xml"),
+                       "orientation": "as recorded"})
+    return {"fly": f"{DATE}/{num}", "date": DATE, "fly_num": num, "datasets": [{"id": 1, "title": "synthetic", "uploader": USER}],
+            "dir": rel(adir), "raw_dir": rel(rdir), "shape": list(shape), "anatomy": rel(adir / "mocorr_concat_avg.tif"),
+            "anatomy_from": "al_analysis", "roiset": rel(roiset), "recordings": recordings, "stacks": stacks, "failed": {},
+            "_spacing": spacing, "_n_rois": len(rois) - 1}
 
 
 def write_reference(d: Path, seed: int = 999, shape=(40, 150, 150), spacing=(2.0, 0.75, 0.75)):
@@ -130,9 +184,13 @@ def write_reference(d: Path, seed: int = 999, shape=(40, 150, 150), spacing=(2.0
 if __name__ == "__main__":
     out = Path(sys.argv[1] if len(sys.argv) > 1 else "synthetic_data")
     n = int(sys.argv[2]) if len(sys.argv) > 2 else 6
+    flies = []
     for i in range(n):
-        d = out / f"fly{i + 1:02d}"
-        n_rois, sp = write_fly(d, 100 + i, hires=i % 2 == 0)
-        print(d, n_rois, "ROIs, voxels (z, y, x)", sp, "um", "+ hires/" if i % 2 == 0 else "")
+        f = write_fly(out, i + 1, 100 + i, hires=i % 2 == 0)
+        print(f"{USER}_{DATE}_{i + 1}", f.pop("_n_rois"), "ROIs, voxels (z, y, x)", f.pop("_spacing"), "um",
+              "+ anatomical stack" + (" (right AL)" if i + 1 in RIGHT_ALS else "") if f["stacks"] else "")
+        flies.append(f)
+    (out / "roi_training.json").write_text(json.dumps({"format": "olfdb ROI training export", "version": 1, "stacks": True,
+                                                       "glomeruli": NAMES, "flies": flies, "skipped": []}, indent=1))
     write_reference(out / "reference")
     print(out / "reference", "(reference atlas)")

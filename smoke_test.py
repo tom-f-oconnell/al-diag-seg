@@ -2,6 +2,11 @@
 (manual labels grown by 2 px, i.e. a model that overshoots borders), to check
 everything around the model without GPU or downloaded weights.
 
+syn/ is an export as from the odor response database (make_synthetic.py). Besides the
+pipeline's results, checks that the ROIs trained on are the glomeruli (no numbered ROI;
+G16_t0 as G16, but not where the fly has a plain G16 too), that the odor the fourth fly
+lacks is left out of every fly, and that the right ALs' anatomical stacks are mirrored.
+
 Runs three times, into syn_results/:
   base         as is
   dropped      G03 and G11 unlabeled in the training flies (still labeled in the
@@ -10,23 +15,26 @@ Runs three times, into syn_results/:
                source of G03 and G11 then
 """
 import csv
+import json
 import sys
 from pathlib import Path
 
 import numpy as np
 from skimage.segmentation import expand_labels
 
+import make_synthetic
 import run_pipeline
-from alseg import segment
+from alseg import atlas, olfdb, segment
 
-VAL = ["fly07", "fly08"]
+VAL = ["Ann_2026-01-01_7", "Ann_2026-01-01_8"]
 DROP = ["G03", "G11"]
-_state = {"drop": (), "val_labels": []}
-_orig_load = run_pipeline.load_fly
+_state = {"drop": (), "val_labels": [], "mirrored": {}, "odors": None, "rois": {}}
+_orig_load, _orig_orient, _orig_align = olfdb.load, atlas.orient_hires, olfdb.align_odors
 
 
-def load(d, *args, **kw):
-    f = _orig_load(d, *args, **kw)
+def load(root, entry, *args, **kw):
+    f = _orig_load(root, entry, *args, **kw)
+    _state["rois"][f["name"]] = sorted(f["lut"].values())
     if f["name"] in VAL:
         _state["val_labels"].append(f["labels"])
     else:
@@ -35,6 +43,17 @@ def load(d, *args, **kw):
                 f["labels"][f["labels"] == lab] = 0
                 del f["lut"][lab]
     return f
+
+
+def orient(f, *args, **kw):
+    mirrored, scores = _orig_orient(f, *args, **kw)
+    _state["mirrored"][f["name"]] = mirrored
+    return mirrored, scores
+
+
+def align(flies):
+    _state["odors"] = _orig_align(flies)
+    return _state["odors"]
 
 
 def fake_train(train_f, val_f, out, **kw):
@@ -71,12 +90,19 @@ def dropped_named(out):
     return res
 
 
-run_pipeline.load_fly = load
+olfdb.load, atlas.orient_hires, olfdb.align_odors = load, orient, align
 segment.train = fake_train
 segment.predict = fake_predict
 run("syn_results/base")
 run("syn_results/dropped", DROP)
 run("syn_results/dropped_ref", DROP, ["--ref", "syn/reference"])
-print(f"\n{' '.join(DROP)} named correctly in held-out flies:")
+names = json.loads(Path("syn_results/base/name_table.json").read_text())
+assert sorted(names) == make_synthetic.NAMES, names
+assert "G16" in _state["rois"]["Ann_2026-01-01_2"] and _state["rois"]["Ann_2026-01-01_5"].count("G16") == 1
+assert sorted(_state["odors"]) == make_synthetic.ODORS[:-1], _state["odors"]
+wrong = {n: m for n, m in _state["mirrored"].items() if m != (int(n.rsplit("_", 1)[1]) in make_synthetic.RIGHT_ALS)}
+assert not wrong, f"anatomical stacks oriented wrongly: {wrong}"
+print(f"\nROIs, odors and the orientation of {len(_state['mirrored'])} anatomical stacks as expected")
+print(f"{' '.join(DROP)} named correctly in held-out flies:")
 for out in ("syn_results/dropped", "syn_results/dropped_ref"):
     print(f"  {out}: {dropped_named(out)}")

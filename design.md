@@ -1,10 +1,19 @@
 # Design notes
 
+## Input: the database's layout, not one of our own
+
+The pipeline reads the odor response database's ROI training download as it comes
+(`alseg/olfdb.py`): al_analysis' files where they are on tensor, and the manifest the
+database writes, which names each recording's odors as in its odor table, so flies of
+different people line up by odor name. Nothing is renamed or reorganized for this code;
+where the two would differ, this code follows the database (e.g. which ROIs are
+glomeruli, by its rules and its list of names).
+
 ## Voxel sizes: few planes far apart, and differences between flies
 
 Functional recordings are typically 8–12 planes 8–12 µm apart, with pixels 10–20×
 finer in-plane, and the resolution differs somewhat between flies. Some flies also have
-a higher resolution, more isotropic anatomical stack (`hires/`).
+a higher resolution, more isotropic anatomical stack (`anat/`).
 
 ### What the pipeline does
 
@@ -20,7 +29,7 @@ a higher resolution, more isotropic anatomical stack (`hires/`).
    resampled back, so glomeruli are the same size in pixels for every fly. The pixel
    size is saved next to the model for `--skip-train`.
 4. **Registration is in physical space** (ANTs, with each image's voxel size), and
-   goes through each fly's `hires/` stack if it has one: the functional planes are
+   goes through each fly's anatomical stack if it has one: the functional planes are
    placed in the stack by a rigid registration within the fly (`--hires-reg`), with the
    planes as the fixed image so the fit only uses real data. Stacks are registered
    between flies (`--reg`, SyN by default). Flies without a stack register their
@@ -38,6 +47,13 @@ On the synthetic data (`make_synthetic.py`, which samples flies like this):
 | Atlas prior argmax accuracy, held-out fly with a stack | 0.85 using stacks vs. 0.80 ignoring them |
 | Same, held-out fly without a stack (better atlas only) | 0.78 vs. 0.77 |
 | Reference fit residual (synthetic reference) | similarity 3.7 µm median vs. affine 5.1 µm; on Grabe → hemibrain, affine is chosen (5.1 vs. 6.1 µm) |
+
+6. **Anatomical stacks are oriented by fit.** The database exports them as recorded,
+   but al_analysis mirrors right ALs' functional data left-right (from the side imaged,
+   in its Google sheet, which the database does not have), and a rigid registration
+   cannot mirror. Each stack is registered onto its fly's planes as recorded and
+   mirrored, and kept the way with the better mutual information. On five of Tom's flies
+   the better way scored about twice the other.
 
 ### Alternatives
 

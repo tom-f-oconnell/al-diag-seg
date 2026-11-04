@@ -96,6 +96,30 @@ def hires_to_functional(fly, transform: str = "Rigid") -> list[str]:
     return register(h["anatomy"], fly["anatomy"], h["spacing"], fly["spacing"], transform)
 
 
+def orient_hires(fly, transform: str = "Rigid") -> tuple[bool, tuple[float, float]]:
+    """Mirrors a fly's high-res stack left-right if it fits the fly's functional planes
+    better that way, and says so in ``fly["hires"]["mirror"]``. For stacks as recorded:
+    al_analysis mirrors the functional data of right ALs to look like left ones, but not
+    their anatomical stacks, and a rigid registration cannot mirror. Each way is
+    registered onto the functional planes, and compared by ANTs' mutual information
+    (lower is better).
+
+    Returns (whether it was mirrored, (score as recorded, score mirrored)).
+    """
+    ants, h = _ants(), fly["hires"]
+    fixed = _img(fly["anatomy"], fly["spacing"])
+    scores = []
+    for stack in (h["anatomy"], h["anatomy"][..., ::-1]):
+        reg = ants.registration(fixed=fixed, moving=_img(stack, h["spacing"]), type_of_transform=transform,
+                                random_seed=0)
+        scores.append(float(ants.image_mutual_information(fixed, reg["warpedmovout"])))
+    mirrored = scores[1] < scores[0]
+    if mirrored:
+        h["anatomy"] = np.ascontiguousarray(h["anatomy"][..., ::-1])
+    h["mirror"] = mirrored
+    return mirrored, (scores[0], scores[1])
+
+
 def template_grid(anatomy, spacing, atlas_um: float) -> tuple[np.ndarray, tuple]:
     """``anatomy`` resampled so no axis is finer than ``atlas_um``."""
     sp = np.maximum(np.asarray(spacing, float), atlas_um)
