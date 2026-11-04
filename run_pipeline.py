@@ -1,10 +1,11 @@
+#!/usr/bin/env python3
 """End-to-end example: ImageJ ROIs + odor responses -> trained model -> named, refined ROIs.
 
-Expected layout (one folder per fly):
+Expected layout (one folder per fly; folders without RoiSet.zip are skipped):
 
     data/
       fly01/
-        anatomy.tif     (Z, Y, X)       mean or baseline fluorescence
+        anatomy.tif     (Z, Y, X)           mean or baseline fluorescence
         responses.tif   (n_odors, Z, Y, X)  mean dF/F per odor, same grid
         RoiSet.zip      ImageJ ROIs, one per glomerulus per z-slice
       fly02/ ...
@@ -13,16 +14,14 @@ If you have raw movies instead of responses.tif, compute it with
 alseg.responses.response_vectors_from_movie(movie, onsets).
 
 Steps: ROIs -> labels; response channels; Cellpose fine-tune; then for each
-held-out fly: predict, refine by tuning alone, and (unless --no-atlas)
-refine with an anatomical prior from a probabilistic atlas of the training
-flies, and name ROIs using tuning + position + shape + layout + atlas.
---ref adds fixed reference atlases (labels only, e.g. ~/src/al_atlas/grabe2016) to
-that atlas, including glomeruli none of the training flies have labels for.
+held-out fly: predict, refine by tuning alone, and (unless --no-atlas) refine
+with an anatomical prior from a probabilistic atlas of the training flies, and
+name ROIs using tuning + position + shape + layout + atlas.
 
-Usage:
-    python run_pipeline.py data/ --val fly07 fly13 --out results/ --epochs 200
-    python run_pipeline.py data/ --val fly07 --skip-train --model results/models/al_glomeruli
-    python run_pipeline.py data/ --val fly07 --spacing 2 0.5 0.5 --ref ~/src/al_atlas/grabe2016
+Writes to --out, per held-out fly: <fly>_pred.tif, <fly>_refined_tuning.tif,
+<fly>_refined_prior.tif, <fly>_atlas_maxprob.tif and
+<fly>_identities_<refinement>.csv; and summary.csv (one row per fly and ROI
+set), name_table.json, and the trained model under models/.
 """
 from __future__ import annotations
 
@@ -46,32 +45,109 @@ def load_fly(d: Path, name_table=None):
             "lut": lut, "overlap": overlap}
 
 
+EXAMPLES = """\
+examples:
+  # train on all flies but three, and evaluate on those three
+  python run_pipeline.py data/ --val fly07 fly13 fly21 --spacing 2 0.5 0.5
+
+  # reuse a trained model instead of training again
+  python run_pipeline.py data/ --val fly07 --skip-train --model results/models/al_glomeruli
+
+  # without a GPU and with a faster (affine-only) atlas, or without the atlas
+  python run_pipeline.py data/ --val fly07 --cpu --reg Affine
+  python run_pipeline.py data/ --val fly07 --no-atlas
+
+  # also take glomeruli none of the training flies have labels for from the
+  # Grabe et al. 2016 atlas (not preferred, see --ref)
+  python run_pipeline.py data/ --val fly07 --spacing 2 0.5 0.5 --ref ~/src/al_atlas/grabe2016
+"""
+
+
+class _HelpFormatter(argparse.RawDescriptionHelpFormatter, argparse.ArgumentDefaultsHelpFormatter):
+    """Keeps the layout of the description and examples, and shows defaults that are set."""
+
+    def _get_help_string(self, action):
+        if action.default is False:
+            return action.help + " (default: off)"
+        if action.default is None or action.default == []:
+            return action.help
+        return super()._get_help_string(action)
+
+
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("data", type=Path)
-    ap.add_argument("--val", nargs="+", required=True, help="fly folder names held out")
-    ap.add_argument("--out", type=Path, default=Path("results"))
-    ap.add_argument("--epochs", type=int, default=200)
-    ap.add_argument("--erode", type=int, default=1, help="px to erode training ROIs")
+    ap = argparse.ArgumentParser(description=__doc__, epilog=EXAMPLES, formatter_class=_HelpFormatter)
+    ap.add_argument("data", type=Path,
+                    help="folder with one subfolder per fly, laid out as above")
+    ap.add_argument("--val", nargs="+", required=True, metavar="FLY",
+                    help="names of the fly folders to hold out. They are left out of training, the "
+                         "identity template and the atlas, and scored against their manual ROIs. "
+                         "Cellpose also uses them as its validation set while training. Required.")
+    ap.add_argument("--out", type=Path, default=Path("results"), metavar="DIR", help="output folder, created if needed")
     ap.add_argument("--spacing", type=float, nargs=3, default=(1, 1, 1), metavar=("Z", "Y", "X"),
-                    help="voxel size in um, used for identity matching")
-    ap.add_argument("--model", type=Path, help="existing model (with --skip-train)")
-    ap.add_argument("--skip-train", action="store_true")
-    ap.add_argument("--cpu", action="store_true")
-    ap.add_argument("--no-atlas", action="store_true", help="skip the anatomical prior")
-    ap.add_argument("--reg", default="SyN", help="ANTs transform: Affine or SyN")
-    ap.add_argument("--w-prior", type=float, default=0.5, help="weight of the atlas prior in refinement")
-    ap.add_argument("--ref", type=Path, nargs="+", default=[],
-                    help="fixed reference atlas folders (labels.tif + a .csv) to add to the atlas; "
-                         "needs the right --spacing")
-    ap.add_argument("--ref-side", help="side of a two-sided reference to use (default: best fit)")
-    ap.add_argument("--ref-reg", default="SyN",
-                    help="Affine (glomerulus centroid fit) or SyN (then label-map registration)")
-    ap.add_argument("--ref-weight", type=float, default=1.0,
-                    help="how many training flies a reference counts as, for glomeruli in both")
+                    help="voxel size in um, the same for every fly. Used to register flies for the "
+                         "atlas, for positions and shapes in identity matching, and to align --ref "
+                         "atlases.")
+
+    g = ap.add_argument_group("segmentation model")
+    g.add_argument("--epochs", type=int, default=200, metavar="N", help="Cellpose fine-tuning epochs")
+    g.add_argument("--erode", type=int, default=1, metavar="PX",
+                   help="pixels to erode the training ROIs by in-plane, so the model learns ROI "
+                        "cores with gaps between neighboring glomeruli")
+    g.add_argument("--skip-train", action="store_true", help="don't train; predict with --model")
+    g.add_argument("--model", type=Path, metavar="PATH",
+                   help="trained Cellpose model for --skip-train, e.g. results/models/al_glomeruli "
+                        "(training saves to <out>/models/al_glomeruli). Required with --skip-train.")
+    g.add_argument("--cpu", action="store_true",
+                   help="run Cellpose on the CPU instead of a GPU (training gets very slow)")
+
+    g = ap.add_argument_group("atlas prior and refinement")
+    g.add_argument("--no-atlas", action="store_true",
+                   help="skip the atlas: no *_refined_prior.tif or *_atlas_maxprob.tif, and "
+                        "identities from tuning, position and shape only")
+    g.add_argument("--reg", default="SyN", metavar="TRANSFORM",
+                   help="ANTs transform for registering the training flies into one atlas and the "
+                        "atlas into each held-out fly: Affine (pose only, faster) or SyN (affine "
+                        "then deformable, for glomerulus layouts that differ between flies), or "
+                        "another ANTsPy type_of_transform")
+    g.add_argument("--w-prior", type=float, default=0.5, metavar="W",
+                   help="weight of the atlas prior relative to odor tuning in refinement. Higher "
+                        "lets the atlas overrule tuning more; on synthetic data >= 1 shrinks or "
+                        "drops ROIs.")
+
+    g = ap.add_argument_group(
+        "fixed reference atlases (not preferred)",
+        "Priors for glomeruli your training flies have no labels for, from another source.\n"
+        "Labeling those glomeruli in more of your own flies is better: that gives priors\n"
+        "from your own preparation, and tuning templates, neither of which a reference has.")
+    g.add_argument("--ref", type=Path, nargs="+", default=[], metavar="FOLDER",
+                   help="reference atlas folders to add to the training-fly atlas, each with "
+                        "labels.tif (voxel size in its ImageJ metadata) and one .csv with 'label' and "
+                        "'glomerulus' columns (and optionally 'side'), as exported by "
+                        "~/src/al_atlas. Not preferred, and in practice only "
+                        "~/src/al_atlas/grabe2016: a reference is one other fly, aligned only "
+                        "through the glomeruli named in both (needs >= 6), so its priors are "
+                        "rougher than your own flies' (Grabe aligned to hemibrain: 5 um median "
+                        "centroid error, median Dice 0.63), and several hemibrain meshes in "
+                        "~/src/al_atlas/hemibrain are fragments. Glomeruli only in the reference "
+                        "get named from position, layout and atlas overlap alone. Needs a correct "
+                        "--spacing, and names that match your ROI names after the same cleanup "
+                        "(e.g. DA4l -> DA4L). Default: no reference.")
+    g.add_argument("--ref-side", metavar="SIDE",
+                   help="which AL of a two-sided reference to use, as in its .csv's 'side' column "
+                        "(left or right for grabe2016). Default: whichever fits the atlas better, "
+                        "mirrored if needed (both are printed).")
+    g.add_argument("--ref-reg", default="SyN", choices=["Affine", "SyN"],
+                   help="how to align a reference to the atlas: Affine (fit to centroids of the "
+                        "shared glomeruli only) or SyN (then deformable registration between the "
+                        "shared glomeruli's label maps)")
+    g.add_argument("--ref-weight", type=float, default=1.0, metavar="N",
+                   help="how many training flies a reference counts as when averaging maps of "
+                        "glomeruli in both; reference-only glomeruli are used as they are")
     a = ap.parse_args()
     if a.ref and a.no_atlas:
         ap.error("--ref needs the atlas (drop --no-atlas)")
+    if a.skip_train and a.model is None:
+        ap.error("--skip-train needs --model")
     a.out.mkdir(parents=True, exist_ok=True)
 
     dirs = sorted(p for p in a.data.iterdir() if (p / "RoiSet.zip").exists())

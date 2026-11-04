@@ -39,7 +39,7 @@ data/fly01/RoiSet.zip
 python run_pipeline.py data/ --val fly07 fly13 fly21 --out results/ --spacing 2 0.5 0.5 --reg SyN --w-prior 0.5
 ```
 
-Per held-out fly it writes `*_pred.tif`, `*_refined_tuning.tif`, `*_refined_prior.tif`, the warped atlas (`*_atlas_maxprob.tif`), identity CSVs for both refinements, and one `summary.csv` row per ROI set. `--no-atlas` skips the priors.
+`python run_pipeline.py -h` lists every option, with defaults and examples. Per held-out fly it writes `*_pred.tif`, `*_refined_tuning.tif`, `*_refined_prior.tif`, the warped atlas (`*_atlas_maxprob.tif`), identity CSVs for both refinements, and one `summary.csv` row per ROI set. `--no-atlas` skips the priors.
 
 ## Anatomical priors: what they do and how to tune them
 
@@ -69,6 +69,11 @@ python run_pipeline.py data/ --val fly07 --spacing 2 0.5 0.5 --ref ~/src/al_atla
 ```
 A reference folder has `labels.tif` (voxel size in its ImageJ metadata) and one `.csv`
 with `label` and `glomerulus` columns, and optionally `side`.
+
+This is not the preferred way to get priors. Labeling those glomeruli in more of your
+own flies is better, since that also gives priors from your own preparation, and tuning
+templates. In practice only `grabe2016` is worth using: several hemibrain meshes in that
+export are fragments.
 
 * **Alignment is by labels, not images.** An affine is fit to the centroids of
   glomeruli named in both (needs ≥ 6; outliers are dropped and listed), then
