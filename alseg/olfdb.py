@@ -7,7 +7,7 @@ file where it is on tensor, as al_analysis leaves it there. Per fly:
   and ``trial_frames_and_odors.json``,
 * its ``RoiSet.zip`` (drawn on its recordings registered together, so on the same grid),
   of which only glomeruli are trained on, as the database tells them apart (`roi_kind`),
-* its anatomy, ``mocorr_concat_avg.tif`` (Z, Y, X): the mean of its motion-corrected movie,
+* its average image, ``mocorr_concat_avg.tif`` (Z, Y, X): the mean of its motion-corrected movie,
 * the ``Experiment.xml`` of its recordings in its raw data (voxel sizes),
 * optionally its anatomical stacks (``anat/``), as ThorImage wrote them (``ChanA_*.tif``,
   one per frame of each plane, or a ``.raw``), not mirrored as al_analysis mirrors right ALs'
@@ -113,19 +113,19 @@ def load(root: Path, entry: dict, name_table=None, keep=None) -> dict:
     """One fly of the export (see the module's docstring), with ``odors``: the name of each
     of its response channels. ``keep``: which ROIs to train on (`roi_keeper`)."""
     root = Path(root)
-    anat = tifffile.imread(root / entry["anatomy"]).astype(np.float32)
+    avg = tifffile.imread(root / entry["average"]).astype(np.float32)
     resp, odors = [], []
     for r in entry["recordings"]:
         x = tifffile.imread(root / r["responses"]).astype(np.float32)
         x = x[None] if x.ndim == 3 else x
-        assert x.shape[0] == len(r["odors"]) and x.shape[1:] == anat.shape, (
-            f"{r['responses']}: {x.shape}, but {len(r['odors'])} odors and anatomy {anat.shape}")
+        assert x.shape[0] == len(r["odors"]) and x.shape[1:] == avg.shape, (
+            f"{r['responses']}: {x.shape}, but {len(r['odors'])} odors and average image {avg.shape}")
         resp.append(x)
         odors += r["odors"]
-    labels, lut, overlap = roi_io.load_roiset(root / entry["roiset"], anat.shape, name_table, keep=keep)
+    labels, lut, overlap = roi_io.load_roiset(root / entry["roiset"], avg.shape, name_table, keep=keep)
     xml = next(root / r["experiment_xml"] for r in entry["recordings"] if r.get("experiment_xml"))
-    f = {"name": fly_name(entry), "anatomy": anat, "responses": np.concatenate(resp), "odors": odors,
-         "labels": labels, "lut": lut, "overlap": overlap, "spacing": metadata.thorimage_spacing(xml, anat.shape)}
+    f = {"name": fly_name(entry), "average": avg, "responses": np.concatenate(resp), "odors": odors,
+         "labels": labels, "lut": lut, "overlap": overlap, "spacing": metadata.thorimage_spacing(xml, avg.shape)}
     if entry.get("stacks"):
         s = entry["stacks"][0]
         h = read_stack(root / s["dir"])

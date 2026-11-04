@@ -104,11 +104,11 @@ def normalize01(img: np.ndarray, lo: float = 1, hi: float = 99.5) -> np.ndarray:
     return np.clip((img - a) / (b - a + 1e-8), 0, 1).astype(np.float32)
 
 
-def build_channels(anatomy: np.ndarray, responses: np.ndarray, pca: SharedPCA) -> np.ndarray:
+def build_channels(average: np.ndarray, responses: np.ndarray, pca: SharedPCA) -> np.ndarray:
     """Stack CNN input channels: (C, Z, Y, X), each scaled to [0, 1].
 
     C = 3 to match Cellpose-SAM's 3-channel input:
-      0: anatomy (mean / baseline fluorescence)
+      0: average image (mean / baseline fluorescence)
       1: local correlation of odor tuning
       2: first shared PCA component of the tuning vectors
     Swap channel 2 for another PC, or use PCs 1-3 as an RGB "tuning color"
@@ -117,5 +117,5 @@ def build_channels(anatomy: np.ndarray, responses: np.ndarray, pca: SharedPCA) -
     """
     lc = local_correlation(responses)
     pcs = pca.transform(responses)
-    chans = [normalize01(anatomy), normalize01(lc), normalize01(pcs[0])]
+    chans = [normalize01(average), normalize01(lc), normalize01(pcs[0])]
     return np.stack(chans)

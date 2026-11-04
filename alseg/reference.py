@@ -2,7 +2,7 @@
 al. 2016 in vivo atlas, or hemibrain ROIs), added to the atlas built from the training
 flies.
 
-A reference has labels but no odor responses, and any anatomy image it has comes from
+A reference has labels but no odor responses, and any image it has comes from
 a different preparation, so it is aligned to the training-fly atlas by its labels
 rather than by image intensity: a linear fit (affine or similarity) to the centroids
 of glomeruli named in both, then optionally a deformable (SyN) registration between the two sets of label

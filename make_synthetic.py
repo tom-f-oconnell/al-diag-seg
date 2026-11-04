@@ -71,7 +71,7 @@ def sample(fly, shape, spacing, offset=(0.0, 0.0, 0.0)):
     return lab, edges & inside
 
 
-def anatomy(lab, gaps, spacing, rng, noise=0.05):
+def fluorescence(lab, gaps, spacing, rng, noise=0.05):
     a = np.where(lab > 0, 1.0, 0.2) + 0.3 * gaps
     return (ndi.gaussian_filter(a, 1.5 / np.asarray(spacing)) + rng.normal(0, noise, lab.shape)).astype(np.float32)
 
@@ -137,7 +137,7 @@ def write_fly(out: Path, num: int, seed: int, hires: bool) -> dict:
     rel = lambda p: p.relative_to(out).as_posix()  # noqa: E731
     adir, rdir = out / USER / "analysis" / DATE / str(num), out / USER / "raw" / DATE / str(num)
     adir.mkdir(parents=True, exist_ok=True)
-    tifffile.imwrite(adir / "mocorr_concat_avg.tif", anatomy(lab, gaps, spacing, rng), imagej=True, metadata={"axes": "ZYX"})
+    tifffile.imwrite(adir / "mocorr_concat_avg.tif", fluorescence(lab, gaps, spacing, rng), imagej=True, metadata={"axes": "ZYX"})
     recordings = []
     for name, odors in RECORDINGS:
         odors = [i for i in rng.permutation(list(odors)) if not (num == 4 and i == N_ODORS - 1)]
@@ -160,13 +160,13 @@ def write_fly(out: Path, num: int, seed: int, hires: bool) -> dict:
     stacks = []
     if hires:
         hl, hg = sample(fly, HIRES_SHAPE, HIRES_SPACING, rng.uniform(-5, 5, 3))
-        stack = anatomy(hl, hg, HIRES_SPACING, rng, 0.03)
+        stack = fluorescence(hl, hg, HIRES_SPACING, rng, 0.03)
         write_stack(rdir / "anat", stack[..., ::-1] if num in RIGHT_ALS else stack, rng)
         stacks.append({"name": "anat", "dir": rel(rdir / "anat"), "experiment_xml": rel(rdir / "anat" / "Experiment.xml"),
                        "orientation": "as recorded"})
     return {"fly": f"{DATE}/{num}", "date": DATE, "fly_num": num, "datasets": [{"id": 1, "title": "synthetic", "uploader": USER}],
-            "dir": rel(adir), "raw_dir": rel(rdir), "shape": list(shape), "anatomy": rel(adir / "mocorr_concat_avg.tif"),
-            "anatomy_from": "al_analysis", "roiset": rel(roiset), "recordings": recordings, "stacks": stacks, "failed": {},
+            "dir": rel(adir), "raw_dir": rel(rdir), "shape": list(shape), "average": rel(adir / "mocorr_concat_avg.tif"),
+            "average_from": "al_analysis", "roiset": rel(roiset), "recordings": recordings, "stacks": stacks, "failed": {},
             "_spacing": spacing, "_n_rois": len(rois) - 1}
 
 

@@ -9,7 +9,7 @@ roi_training.json, saying which is what; per fly:
       <diagnostic recording>/trialmean_dff.tif            (n_odors, Z, Y, X) mean dF/F per odor
       <diagnostic recording>/trial_frames_and_odors.json  each trial's odor
       <one of those>/RoiSet.zip                           ImageJ ROIs, one per glomerulus per plane
-      mocorr_concat_avg.tif                               (Z, Y, X) mean of its motion-corrected movie
+      mocorr_concat_avg.tif                               (Z, Y, X) average image: mean of its motion-corrected movie
     <its folder in the raw data>/
       <diagnostic recording>/Experiment.xml               ThorImage metadata: voxel sizes
       anat/                                               optional: its anatomical stack, as recorded
@@ -32,7 +32,7 @@ Tom_2023-11-19_1 (as --val takes them).
 
 Steps: ROIs -> labels; response channels; Cellpose fine-tune; then for each
 held-out fly: predict, refine by tuning alone, and (unless --no-atlas) refine
-with an anatomical prior from a probabilistic atlas of the training flies, and
+with an atlas prior from a probabilistic atlas of the training flies, and
 name ROIs using tuning + position + shape + layout + atlas.
 
 Writes to --out, per held-out fly: <fly>_pred.tif, <fly>_refined_tuning.tif,
@@ -203,7 +203,7 @@ def main():
     pca = responses.SharedPCA(3).fit([f["responses"] for f in train_f],
                                      masks=[f["labels"] > 0 for f in train_f])
     for f in flies:
-        f["channels"] = responses.build_channels(f["anatomy"], f["responses"], pca)
+        f["channels"] = responses.build_channels(f["average"], f["responses"], pca)
 
     xy_um = a.xy_um or (model_xy_um(a.model) if a.skip_train else None)
     if xy_um is None:

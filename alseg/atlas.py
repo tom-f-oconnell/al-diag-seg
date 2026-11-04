@@ -2,7 +2,7 @@
 
 Training flies are registered to a template (ANTsPy), their labeled glomeruli are
 warped into that space and averaged into one probability map per glomerulus. For a
-new fly, the template is registered to the fly's anatomy and the probability maps are
+new fly, the template is registered to the fly's average image and the probability maps are
 warped onto the fly's own voxel grid, where they act as soft priors for refinement
 and identity assignment.
 
@@ -10,8 +10,8 @@ Registration is in physical space (um), with each image's own voxel size, so fli
 can differ in resolution, and functional recordings can be a few planes many um
 apart. Each fly is registered between flies through its "registration image": a
 higher resolution anatomical stack of the same fly (``fly["hires"]``) if there is
-one, since that registers much better than a few planes, otherwise the functional
-anatomy itself. The functional planes are placed in the fly's high-res stack by a
+one, since that registers much better than a few planes, otherwise its average image
+(the mean of its motion-corrected functional recordings). The functional planes are placed in the fly's high-res stack by a
 rigid (or affine) registration within the fly. So labels go functional planes ->
 high-res stack -> template, and priors go back the other way.
 
@@ -80,10 +80,10 @@ class Warp:
 
 
 def registration_image(fly) -> tuple[np.ndarray, tuple]:
-    """(anatomy, spacing) a fly is registered between flies with: its high-res stack
-    if it has one, otherwise its functional anatomy."""
+    """(image, spacing) a fly is registered between flies with: its high-res anatomical
+    stack if it has one, otherwise its average image (of its functional planes)."""
     h = fly.get("hires")
-    return (h["anatomy"], h["spacing"]) if h else (fly["anatomy"], fly["spacing"])
+    return (h["anatomy"], h["spacing"]) if h else (fly["average"], fly["spacing"])
 
 
 def hires_to_functional(fly, transform: str = "Rigid") -> list[str]:
@@ -93,7 +93,7 @@ def hires_to_functional(fly, transform: str = "Rigid") -> list[str]:
     h = fly.get("hires")
     if not h:
         return []
-    return register(h["anatomy"], fly["anatomy"], h["spacing"], fly["spacing"], transform)
+    return register(h["anatomy"], fly["average"], h["spacing"], fly["spacing"], transform)
 
 
 def orient_hires(fly, transform: str = "Rigid") -> tuple[bool, tuple[float, float]]:
@@ -107,7 +107,7 @@ def orient_hires(fly, transform: str = "Rigid") -> tuple[bool, tuple[float, floa
     Returns (whether it was mirrored, (score as recorded, score mirrored)).
     """
     ants, h = _ants(), fly["hires"]
-    fixed = _img(fly["anatomy"], fly["spacing"])
+    fixed = _img(fly["average"], fly["spacing"])
     scores = []
     for stack in (h["anatomy"], h["anatomy"][..., ::-1]):
         reg = ants.registration(fixed=fixed, moving=_img(stack, h["spacing"]), type_of_transform=transform,
@@ -120,18 +120,18 @@ def orient_hires(fly, transform: str = "Rigid") -> tuple[bool, tuple[float, floa
     return mirrored, (scores[0], scores[1])
 
 
-def template_grid(anatomy, spacing, atlas_um: float) -> tuple[np.ndarray, tuple]:
-    """``anatomy`` resampled so no axis is finer than ``atlas_um``."""
+def template_grid(image, spacing, atlas_um: float) -> tuple[np.ndarray, tuple]:
+    """``image`` resampled so no axis is finer than ``atlas_um``."""
     sp = np.maximum(np.asarray(spacing, float), atlas_um)
     if np.allclose(sp, spacing):
-        return anatomy.astype(np.float32), tuple(float(s) for s in spacing)
-    img = _ants().resample_image(_img(anatomy, spacing), tuple(sp), use_voxels=False, interp_type=0)
+        return image.astype(np.float32), tuple(float(s) for s in spacing)
+    img = _ants().resample_image(_img(image, spacing), tuple(sp), use_voxels=False, interp_type=0)
     return img.numpy(), tuple(float(s) for s in img.spacing)
 
 
 @dataclass
 class Atlas:
-    template: np.ndarray  # (Z, Y, X) mean registered anatomy, each fly scaled to [0, 1]
+    template: np.ndarray  # (Z, Y, X) mean of the flies' registered registration images, each scaled to [0, 1]
     prob: np.ndarray  # (K, Z, Y, X) float16, P(glomerulus k at voxel)
     names: list[str]
     spacing: tuple[float, float, float]
@@ -140,7 +140,7 @@ class Atlas:
 
 def build_atlas(flies, transform: str = "SyN", hires_transform: str = "Rigid", atlas_um: float = 1.0,
                 smooth_um: float = 1.0, reference: int | None = None) -> Atlas:
-    """flies: [{"anatomy", "labels", "lut": {label: name}, "spacing", optional "hires":
+    """flies: [{"average", "labels", "lut": {label: name}, "spacing", optional "hires":
     {"anatomy", "spacing"}}, ...] (training flies only).
 
     ``reference`` (index) is the fly whose registration image becomes the template;
@@ -182,5 +182,5 @@ def atlas_to_fly(atlas: Atlas, fly, transform: str = "SyN", hires_transform: str
     anat, sp = registration_image(fly)
     chain = ([(t, False) for t in hires_to_functional(fly, hires_transform)]
              + [(t, False) for t in register(atlas.template, anat, atlas.spacing, sp, transform)])
-    warp = Warp(fly["anatomy"].shape, fly["spacing"], chain)
+    warp = Warp(fly["average"].shape, fly["spacing"], chain)
     return np.stack([np.clip(warp(p.astype(np.float32), atlas.spacing), 0, 1) for p in atlas.prob])

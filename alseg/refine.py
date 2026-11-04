@@ -153,7 +153,7 @@ def refine_with_prior(
     n_iter: int = 5,
     min_size_um3: float = 20.0,
 ) -> np.ndarray:
-    """Refinement as energy minimization, with an anatomical (atlas) prior.
+    """Refinement as energy minimization, with an atlas prior.
 
     Each candidate voxel x gets one of: unassigned (0), its ROI, or an
     adjacent ROI. The cost of giving x to ROI l is

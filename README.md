@@ -46,7 +46,7 @@ is what. Per fly:
 <its motion-corrected data folder>/<diagnostic recording>/trialmean_dff.tif            (n_odors, Z, Y, X) mean dF/F per odor
 <its motion-corrected data folder>/<diagnostic recording>/trial_frames_and_odors.json  each trial's odor
 <its motion-corrected data folder>/<a recording>/RoiSet.zip                            ImageJ ROIs, per plane
-<its motion-corrected data folder>/mocorr_concat_avg.tif                               (Z, Y, X) anatomy
+<its motion-corrected data folder>/mocorr_concat_avg.tif                               (Z, Y, X) average image
 <its raw data folder>/<diagnostic recording>/Experiment.xml                            voxel sizes
 <its raw data folder>/anat/                                                            optional: its anatomical stack
 ```
@@ -68,7 +68,7 @@ placed on its fly's planes both ways and kept the way that fits better (printed)
 
 `python run_pipeline.py -h` lists every option, with defaults and examples. Per held-out fly it writes `*_pred.tif`, `*_refined_tuning.tif`, `*_refined_prior.tif`, the warped atlas (`*_atlas_maxprob.tif`), identity CSVs for both refinements, and one `summary.csv` row per ROI set. `--no-atlas` skips the priors.
 
-## Anatomical priors: what they do and how to tune them
+## Atlas priors: what they do and how to tune them
 
 * **Order of operations.** Predict → name the raw ROIs (needs to know which glomerulus each ROI is before it can apply that glomerulus's prior) → refine with the prior → name again.
 * **`w_prior`** sets how much the atlas can overrule the tuning. Leaving a voxel unassigned costs the same as joining an ROI at `min_corr` with a neutral prior of 0.5, so a high prior lowers the tuning evidence needed and a low prior raises it.
@@ -129,6 +129,6 @@ affine and 0.63 after SyN.
 
 * **ROI names.** ROIs of one glomerulus on several planes (one name) are one 3D object; `roi_io._clean_name` also maps names like `DM2_z12` or `DM2 (3)` to `DM2`, and uppercases them (`DA4l` → `DA4L`), to match reference atlases.
 * **Slice position.** Read from `z_position` (hyperstacks) or `position` (plain stacks), 1-based. An ROI with no position raises an error.
-* **Channels.** Cellpose-SAM takes 3 channels: anatomy, local correlation of tuning, PC1 of tuning. Try PCs 1–3 instead if anatomy is weak.
+* **Channels.** Cellpose-SAM takes 3 channels: the average image, local correlation of tuning, PC1 of tuning. Try PCs 1–3 instead if the average image is weak.
 * **Refinement trades size for purity.** On the synthetic data, tuning-only refinement brings border leak from ~0.13 (overshooting ROIs) to 0.04–0.07 (manual: 0.03–0.04), but drops ROIs whose cores are too small or dim. Tune `min_corr`, `margin` and `min_rel_amp` against crosstalk metrics, not Dice alone.
 * **Voxel sizes.** Check the per-fly voxel sizes `run_pipeline.py` prints. Refinement distances (`grow_um`, `min_size_um3`) are in µm, so they carry over between flies with different resolutions.

@@ -33,7 +33,7 @@ a higher resolution, more isotropic anatomical stack (`anat/`).
    placed in the stack by a rigid registration within the fly (`--hires-reg`), with the
    planes as the fixed image so the fit only uses real data. Stacks are registered
    between flies (`--reg`, SyN by default). Flies without a stack register their
-   functional anatomy directly. The template is the most finely sampled (in z)
+   average image directly. The template is the most finely sampled (in z)
    registration image, coarsened to `--atlas-um`.
 5. **Reference atlases** (`--ref`) are fit to the atlas with an affine or a similarity
    transform, whichever predicts left-out glomeruli better. Centroids from planes far
