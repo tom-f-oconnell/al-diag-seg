@@ -18,9 +18,10 @@ won't work until antspyx ships wheels for it.
 |---|---|
 | `alseg/roi_io.py` | RoiSet.zip → `(Z, Y, X)` label volume. ROIs sharing a glomerulus name across slices become one 3D object. Falls back to linking by slice-to-slice overlap if ROIs have ImageJ's default numeric names. Overlapping voxels are returned separately. |
 | `alseg/responses.py` | Per-voxel 24-odor response vectors (from a raw movie + onsets, or precomputed), local-correlation map, a PCA basis shared across flies, and the 3 input channels. |
-| `alseg/segment.py` | Builds per-slice training data (eroded ROI cores), fine-tunes Cellpose-SAM, predicts slice by slice and stitches into 3D. |
-| `alseg/refine.py` | `refine_with_prior`: refinement as energy minimization over voxel labels, with costs for tuning mismatch, `-log` atlas prior and neighbor disagreement (smoothness), solved by ICM. `refine_by_tuning`: the simpler tuning-only version: grows each ROI a little, then keeps only voxels that match its own tuning better than any neighbor's and are bright enough, and drops mixed border voxels. Also computes crosstalk metrics (coherence, neighbor tuning correlation, border leak). |
-| `alseg/atlas.py` | Probabilistic atlas: registers training flies to a reference (ANTsPy, Affine or SyN), averages each glomerulus's warped mask into a probability map, and warps the atlas into a new fly. |
+| `alseg/metadata.py` | Voxel sizes from ThorImage `Experiment.xml` files, via [hong2p](https://github.com/ejhonglab/hong2p). |
+| `alseg/segment.py` | Builds per-slice training data (eroded ROI cores), fine-tunes Cellpose-SAM, predicts slice by slice and stitches into 3D. Every fly's planes are resampled in-plane (never in z) to one pixel size for the model. |
+| `alseg/refine.py` | Distances (ROI growth, neighbors, minimum size) are in µm, so ROIs don't grow into planes far away. `refine_with_prior`: refinement as energy minimization over voxel labels, with costs for tuning mismatch, `-log` atlas prior and neighbor disagreement (smoothness), solved by ICM. `refine_by_tuning`: the simpler tuning-only version: grows each ROI a little, then keeps only voxels that match its own tuning better than any neighbor's and are bright enough, and drops mixed border voxels. Also computes crosstalk metrics (coherence, neighbor tuning correlation, border leak). |
+| `alseg/atlas.py` | Probabilistic atlas: registers training flies to a template (ANTsPy, Affine or SyN, in physical space with each fly's voxel size, through its high-res stack if it has one), averages each glomerulus's warped mask into a probability map, and warps the atlas into a new fly. |
 | `alseg/reference.py` | Adds a fixed reference atlas (labels only, e.g. Grabe et al. 2016 or hemibrain) to the training-fly atlas, aligned by its labels; see [below](#fixed-reference-atlases). |
 | `alseg/identity.py` | Builds a per-glomerulus template (tuning, position, shape) from labeled flies and names new ROIs. Cost = tuning + position + shape (Mahalanobis on log volume and axis lengths) + atlas overlap + layout (offsets to neighbors vs. template offsets, re-solved iteratively). Poor matches stay unassigned. |
 | `alseg/metrics.py` | IoU/Dice matching, precision/recall, split and merge counts. |
@@ -30,14 +31,25 @@ won't work until antspyx ships wheels for it.
 ## Data layout
 
 ```
-data/fly01/anatomy.tif     (Z, Y, X)
-data/fly01/responses.tif   (n_odors, Z, Y, X)  mean dF/F per odor, motion-corrected
+data/fly01/anatomy.tif            (Z, Y, X)
+data/fly01/responses.tif          (n_odors, Z, Y, X)  mean dF/F per odor, motion-corrected
 data/fly01/RoiSet.zip
+data/fly01/Experiment.xml         optional: ThorImage metadata of that recording
+data/fly01/hires/anatomy.tif      optional: higher resolution anatomical stack of the fly
+data/fly01/hires/Experiment.xml   its metadata (required if fly01/Experiment.xml exists)
 ```
 
 ```
-python run_pipeline.py data/ --val fly07 fly13 fly21 --out results/ --spacing 2 0.5 0.5 --reg SyN --w-prior 0.5
+python run_pipeline.py data/ --val fly07 fly13 fly21 --out results/
 ```
+
+Voxel sizes come from the `Experiment.xml` files if there are any. Then every fly needs
+one, as does every `hires/` stack, and `--spacing`/`--hires-spacing` are errors. The
+XML must describe the TIFF as is (not cropped or binned). Without XML files, give
+`--spacing Z Y X` (and `--hires-spacing` for `hires/` stacks) in µm. Flies can differ in
+voxel size, and planes can be much further apart than pixels (e.g. 8–12 planes
+~10 µm apart); `hires/` stacks are optional but improve registration between flies. See
+[design.md](design.md) for how this is handled, and the alternatives.
 
 `python run_pipeline.py -h` lists every option, with defaults and examples. Per held-out fly it writes `*_pred.tif`, `*_refined_tuning.tif`, `*_refined_prior.tif`, the warped atlas (`*_atlas_maxprob.tif`), identity CSVs for both refinements, and one `summary.csv` row per ROI set. `--no-atlas` skips the priors.
 
@@ -48,15 +60,18 @@ python run_pipeline.py data/ --val fly07 fly13 fly21 --out results/ --spacing 2 
 * **Identity weights** (`w_tuning`, `w_position`, `w_shape`, `w_atlas`, `w_layout`) are normalized by their sum, so `max_cost` keeps its meaning when you turn terms on or off.
 * **Keep priors soft.** An atlas from a few flies is blurry; on synthetic data a strong prior (`w_prior` ≥ 1) shrinks or drops ROIs. Tune weights on held-out flies against both Dice and crosstalk.
 
-Synthetic results (2 held-out flies, 6-fly atlas, ROIs that overshoot by 2 px as the "prediction"):
+Synthetic results (2 held-out flies, 6-fly atlas, ROIs that overshoot by 2 px as the
+"prediction"; flies have 8–12 planes 8–12 µm apart, 0.9–1.2 µm pixels, and half have a
+`hires/` stack):
 
 | Refinement | Recall | Dice | Border leak |
 |---|---|---|---|
-| none (overshooting prediction) | 1.0 | 0.89 | 0.16 |
-| tuning only | 0.62–0.81 | 0.79–0.80 | 0.07–0.08 |
-| tuning + atlas prior (`w_prior` 0.5) | 0.94 | 0.83–0.87 | 0.11–0.12 |
+| none (overshooting prediction) | 1.0 | 0.86–0.87 | 0.13–0.14 |
+| tuning only | 0.75–0.88 | 0.93–0.94 | 0.04–0.07 |
+| tuning + atlas prior (`w_prior` 0.5) | 1.0 | 0.89–0.91 | 0.06–0.08 |
 
-Manual ROIs have leak ≈ 0.08. The prior keeps ROIs whole (higher recall and Dice), and pure tuning is stricter about borders. In identity matching, tuning alone swapped the two nearly identically tuned glomeruli, while any position term (centroid, atlas, or layout) fixed it; all terms together got 32/32. The synthetic data are too easy to tell those terms apart, so compare them on your flies.
+Manual ROIs have leak ≈ 0.03–0.04. The prior keeps every ROI (recall 1.0), and pure
+tuning is stricter about borders but drops some ROIs. In identity matching, tuning alone swapped the two nearly identically tuned glomeruli, while any position term (centroid, atlas, or layout) fixed it; all terms together got 32/32. The synthetic data are too easy to tell those terms apart, so compare them on your flies.
 
 With 20–30 flies, hold out 4–5 flies per fold and rotate (5-fold over flies). Never split slices of the same fly between train and validation.
 
@@ -65,7 +80,7 @@ With 20–30 flies, hold out 4–5 flies per fold and rotate (5-fold over flies)
 `--ref` adds atlases from other sources to the one built from your training flies, e.g.
 the exports in [al_atlas](https://github.com/ejhonglab/al_atlas):
 ```
-python run_pipeline.py data/ --val fly07 --spacing 2 0.5 0.5 --ref ~/src/al_atlas/grabe2016
+python run_pipeline.py data/ --val fly07 --ref ~/src/al_atlas/grabe2016
 ```
 A reference folder has `labels.tif` (voxel size in its ImageJ metadata) and one `.csv`
 with `label` and `glomerulus` columns, and optionally `side`.
@@ -73,11 +88,12 @@ with `label` and `glomerulus` columns, and optionally `side`.
 Of the al_atlas exports, `grabe2016` is the better one: several hemibrain meshes in
 that export are fragments.
 
-* **Alignment is by labels, not images.** An affine is fit to the centroids of
-  glomeruli named in both (needs ≥ 6; outliers are dropped and listed), then
+* **Alignment is by labels, not images.** A linear map is fit to the centroids of
+  glomeruli named in both (needs ≥ 6; outliers are dropped and listed): a full affine
+  or a similarity transform, whichever predicts left-out glomeruli better. Then
   `--ref-reg SyN` (default) registers the two sets of label maps. Your atlas is
-  already registered to each new fly, so the reference follows it. `--spacing`
-  must be right, since the fit is in µm.
+  already registered to each new fly, so the reference follows it. Voxel sizes must
+  be right, since the fit is in µm.
 * **Side.** For a reference with both ALs, the side that fits better is used, mirrored
   if needed (both are printed); `--ref-side` forces one.
 * **Glomeruli you never labeled** get their own atlas channels, and can be named from
@@ -87,14 +103,17 @@ that export are fragments.
   differ in places: Grabe has VC3 and VP1 where the hemibrain has VC3l/m and VP1d/l/m.
 
 On synthetic data, with G03 and G11 unlabeled in the training flies, atlas-based
-naming got 28/32 ROIs right (0/4 of the two dropped glomeruli); with the reference, 32/32.
-Aligning the Grabe atlas to the hemibrain right AL (two different flies, in vivo vs.
-EM) left 5 µm median centroid error, and shared glomeruli overlapped with median
-Dice 0.46 after the affine and 0.63 after SyN.
+naming got 28/32 ROIs right (0/4 of the two dropped glomeruli); with the reference,
+30/32 (G03 in both flies; G11 left unassigned, as its shape varies a lot between the
+fake flies, so one reference fly misplaces it by 10–30 µm). Aligning the Grabe atlas
+to the hemibrain right AL (two different flies, in vivo vs. EM) left 5 µm median
+centroid error, and shared glomeruli overlapped with median Dice 0.46 after the
+affine and 0.63 after SyN.
 
 ## Things to check on your data
 
 * **ROI names.** `roi_io._clean_name` maps names like `DM2_z12` or `DM2 (3)` to `DM2`. Edit it to match your naming. ROIs in one zip need unique names (ImageJ enforces this), so the slice suffix is expected.
 * **Slice position.** Read from `z_position` (hyperstacks) or `position` (plain stacks), 1-based. An ROI with no position raises an error.
 * **Channels.** Cellpose-SAM takes 3 channels: anatomy, local correlation of tuning, PC1 of tuning. Try PCs 1–3 instead if anatomy is weak.
-* **Refinement trades size for purity.** On the synthetic data it brings border leak from 0.16 (overshooting ROIs) back to the manual level of ~0.085 and raises coherence, but ROIs get ~10–15% smaller, so Dice against the manual ROIs drops. Tune `min_corr`, `margin` and `min_rel_amp` against crosstalk metrics, not Dice alone.
+* **Refinement trades size for purity.** On the synthetic data, tuning-only refinement brings border leak from ~0.13 (overshooting ROIs) to 0.04–0.07 (manual: 0.03–0.04), but drops ROIs whose cores are too small or dim. Tune `min_corr`, `margin` and `min_rel_amp` against crosstalk metrics, not Dice alone.
+* **Voxel sizes.** Check the per-fly voxel sizes `run_pipeline.py` prints. Refinement distances (`grow_um`, `min_size_um3`) are in µm, so they carry over between flies with different resolutions.

@@ -13,4 +13,8 @@ dependencies = [
     "roifile",
     "cellpose>=4",
     "antspyx",
+    "hong2p",
 ]
+
+[tool.uv.sources]
+hong2p = { git = "https://github.com/ejhonglab/hong2p" }

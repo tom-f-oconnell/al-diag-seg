@@ -4,8 +4,8 @@ flies.
 
 A reference has labels but no odor responses, and any anatomy image it has comes from
 a different preparation, so it is aligned to the training-fly atlas by its labels
-rather than by image intensity: an affine fit to the centroids of glomeruli named in
-both, then optionally a deformable (SyN) registration between the two sets of label
+rather than by image intensity: a linear fit (affine or similarity) to the centroids
+of glomeruli named in both, then optionally a deformable (SyN) registration between the two sets of label
 maps. The training-fly atlas is already registered to each new fly, so the reference
 reaches new flies through it.
 
@@ -96,42 +96,71 @@ def _atlas_centroids(atl: Atlas) -> dict[str, np.ndarray]:
             for n, p in zip(atl.names, atl.prob) if p.max() > 0}
 
 
-def fit_affine(src: np.ndarray, dst: np.ndarray, n_reject: int = 2):
-    """Least squares dst ~= src @ A.T + b (um), dropping points with residuals over 3x
-    the median and refitting, up to ``n_reject`` times. Returns A, b, kept mask."""
+def _affine(src, dst):
+    M, *_ = np.linalg.lstsq(np.c_[src, np.ones(len(src))], dst, rcond=None)
+    return M[:3].T, M[3]
+
+
+def _similarity(src, dst):
+    """Rotation (or reflection), one scale and a translation."""
+    s0, d0 = src - src.mean(0), dst - dst.mean(0)
+    U, S, Vt = np.linalg.svd(d0.T @ s0)
+    A = U @ Vt * (S.sum() / (s0**2).sum())
+    return A, dst.mean(0) - src.mean(0) @ A.T
+
+
+_FITS = {"affine": _affine, "similarity": _similarity}
+
+
+def _loo_error(fit, src, dst):
+    """Median error predicting each point from a fit to the others."""
+    err = []
+    for i in range(len(src)):
+        m = np.arange(len(src)) != i
+        A, b = fit(src[m], dst[m])
+        err.append(np.linalg.norm(src[i] @ A.T + b - dst[i]))
+    return np.median(err)
+
+
+def fit_transform(src: np.ndarray, dst: np.ndarray, n_reject: int = 2):
+    """Least squares dst ~= src @ A.T + b (um), with A a full affine or a similarity
+    transform, whichever predicts left-out points better (a similarity is more
+    robust with few or noisy points, e.g. centroids from planes far apart). Points
+    with residuals over 3x the median are dropped and the fit redone, up to
+    ``n_reject`` times. Returns A, b, kept mask, and which kind of fit."""
     keep = np.ones(len(src), bool)
     for _ in range(n_reject + 1):
-        X = np.c_[src[keep], np.ones(keep.sum())]
-        M, *_ = np.linalg.lstsq(X, dst[keep], rcond=None)
-        res = np.linalg.norm(np.c_[src, np.ones(len(src))] @ M - dst, axis=1)
+        kind = min(_FITS, key=lambda k: _loo_error(_FITS[k], src[keep], dst[keep]))
+        A, b = _FITS[kind](src[keep], dst[keep])
+        res = np.linalg.norm(src @ A.T + b - dst, axis=1)
         new = res <= max(3 * np.median(res[keep]), 1e-6)
         if new.sum() < 6 or np.array_equal(new, keep):
             break
         keep = new
-    return M[:3].T, M[3], keep
+    return A, b, keep, kind
 
 
 def _fit(ref: Reference, atl: Atlas, ac=None):
-    """Affine from reference to atlas um, fit to glomeruli named in both. ``ac``:
+    """Linear map from reference to atlas um, fit to glomeruli named in both. ``ac``:
     precomputed _atlas_centroids(atl). Returns (shared names, A, b, kept mask,
-    residual per shared glomerulus)."""
+    residual per shared glomerulus, kind of fit)."""
     rc = _centroids(ref)
     ac = _atlas_centroids(atl) if ac is None else ac
     shared = sorted(set(rc) & set(ac))
     if len(shared) < 6:
         raise ValueError(f"only {len(shared)} glomeruli named in both the reference and the atlas")
     src, dst = np.array([rc[n] for n in shared]), np.array([ac[n] for n in shared])
-    A, b, kept = fit_affine(src, dst)
-    return shared, A, b, kept, np.linalg.norm(src @ A.T + b - dst, axis=1)
+    A, b, kept, kind = fit_transform(src, dst)
+    return shared, A, b, kept, np.linalg.norm(src @ A.T + b - dst, axis=1), kind
 
 
 def align_reference(ref: Reference, atl: Atlas, transform: str = "SyN", seed: int = 0, ac=None):
     """Resample the reference labels onto the atlas grid.
 
-    transform: "Affine" (centroid fit only) or "SyN" (then deformable registration of
+    transform: "Affine" (linear centroid fit only) or "SyN" (then deformable registration of
     the shared glomeruli's label maps). Returns (labels on the atlas grid, info).
     """
-    shared, A, b, kept, res = _fit(ref, atl, ac)
+    shared, A, b, kept, res, kind = _fit(ref, atl, ac)
 
     # scipy maps output (atlas) voxel indices to input (reference) voxel indices
     sa, sr = np.asarray(atl.spacing), np.asarray(ref.spacing)
@@ -143,7 +172,7 @@ def align_reference(ref: Reference, atl: Atlas, transform: str = "SyN", seed: in
     if transform != "Affine":
         fit = [n for n, k in zip(shared, kept) if k]
         out = _register_labels(out, atl, {n: l for l, n in ref.names.items()}, fit, seed)
-    info = {"side": ref.side, "n_shared": len(shared), "residual_median_um": float(np.median(res[kept])),
+    info = {"side": ref.side, "fit": kind, "n_shared": len(shared), "residual_median_um": float(np.median(res[kept])),
             "residual_max_um": float(res[kept].max()), "rejected": [n for n, k in zip(shared, kept) if not k],
             "mirrored": bool(np.linalg.det(A) < 0)}
     return out, info
@@ -218,7 +247,7 @@ def add_best_side(atl: Atlas, folder, side: str | None = None, **kw) -> tuple[At
     for s in cands:
         ref = load_reference(folder, s)
         try:
-            *_, kept, res = _fit(ref, atl, ac)
+            *_, kept, res, _ = _fit(ref, atl, ac)
         except ValueError:
             continue
         r = float(np.median(res[kept]))

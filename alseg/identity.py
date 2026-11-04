@@ -171,7 +171,7 @@ def assign_identities(
     base /= active
     w_layout = w_layout / active
 
-    nb = neighbors(labels)
+    nb = neighbors(labels, spacing=sp)
     assign = _solve(base, max_cost)
     for _ in range(n_layout_iter if w_layout else 0):
         layout = _layout_cost(labs, nb, roi_pos, exp_pos, pos_sd, assign)

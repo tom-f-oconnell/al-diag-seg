@@ -25,8 +25,8 @@ _state = {"drop": (), "val_labels": []}
 _orig_load = run_pipeline.load_fly
 
 
-def load(d, nt=None):
-    f = _orig_load(d, nt)
+def load(d, *args, **kw):
+    f = _orig_load(d, *args, **kw)
     if f["name"] in VAL:
         _state["val_labels"].append(f["labels"])
     else:
@@ -38,8 +38,9 @@ def load(d, nt=None):
 
 
 def fake_train(train_f, val_f, out, **kw):
-    X, Y = segment.make_training_slices(train_f, erode=kw.get("erode", 1))
-    print(f"[fake train] {len(X)} slices, image {X[0].shape}, max objects/slice {max(m.max() for m in Y)}")
+    X, Y = segment.make_training_slices(train_f, erode=kw.get("erode", 1), xy_um=kw.get("xy_um"))
+    print(f"[fake train] {len(X)} slices, images {sorted({x.shape for x in X})}, "
+          f"max objects/slice {max(m.max() for m in Y)}")
     return "fake", [], []
 
 

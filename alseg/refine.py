@@ -1,4 +1,8 @@
-"""Use odor tuning to tighten ROIs, and measure crosstalk between neighbors."""
+"""Use odor tuning to tighten ROIs, and measure crosstalk between neighbors.
+
+Distances are in um and use each fly's voxel size (``spacing``, (z, y, x)), so ROIs
+only grow into another plane when the planes are closer than the growth distance.
+"""
 from __future__ import annotations
 
 import numpy as np
@@ -37,10 +41,11 @@ def _disk(r):
     return x * x + y * y <= r * r
 
 
-def neighbors(labels: np.ndarray, gap: int = 3) -> dict[int, set[int]]:
-    """Pairs of ROIs within ``gap`` voxels of each other."""
+def neighbors(labels: np.ndarray, gap_um: float = 3.0, spacing=(1.0, 1.0, 1.0)) -> dict[int, set[int]]:
+    """Pairs of ROIs within ``gap_um`` of each other (ROIs on adjacent planes count
+    as neighbors if they overlap after growing in-plane)."""
     nb: dict[int, set[int]] = {int(l): set() for l in np.unique(labels) if l}
-    grown = expand_labels(labels, gap)
+    grown = expand_labels(labels, gap_um, spacing=spacing)
     for lab in nb:
         ring = ndi.binary_dilation(grown == lab) & (grown != lab) & (grown > 0)
         nb[lab] = set(int(x) for x in np.unique(grown[ring]))
@@ -50,15 +55,16 @@ def neighbors(labels: np.ndarray, gap: int = 3) -> dict[int, set[int]]:
 def refine_by_tuning(
     responses: np.ndarray,
     labels: np.ndarray,
-    grow: int = 2,
+    spacing=(1.0, 1.0, 1.0),
+    grow_um: float = 2.0,
     min_corr: float = 0.3,
     margin: float = 0.05,
     min_rel_amp: float = 0.5,
-    min_size: int = 20,
+    min_size_um3: float = 20.0,
 ) -> np.ndarray:
     """Re-assign voxels to the ROI whose tuning they match, and drop ambiguous ones.
 
-    1. Each ROI is allowed to grow by ``grow`` voxels (candidates).
+    1. Each ROI is allowed to grow by ``grow_um`` (candidates).
     2. A candidate voxel is kept for ROI A only if its tuning correlates with
        A's core tuning at >= ``min_corr`` and beats every neighbor's
        correlation by ``margin``. Otherwise it is dropped (left unassigned),
@@ -73,7 +79,7 @@ def refine_by_tuning(
     T = T - T.mean(1, keepdims=True)
     T /= np.linalg.norm(T, axis=1, keepdims=True) + 1e-8
 
-    cand = expand_labels(labels, grow)
+    cand = expand_labels(labels, grow_um, spacing=spacing)
     region = cand > 0
     V = _voxel_vectors(responses)[region]  # (n, n_odors)
     raw = np.moveaxis(responses, 0, -1)[region]
@@ -82,7 +88,7 @@ def refine_by_tuning(
     C = V @ T.T  # correlation with each ROI's tuning
 
     own_idx = np.searchsorted(labs, cand[region])
-    nb = neighbors(labels, gap=grow + 1)
+    nb = neighbors(labels, grow_um + max(spacing[1:]), spacing)
     allowed = np.zeros((len(labs), len(labs)), bool)
     for i, l in enumerate(labs):
         allowed[i, i] = True
@@ -108,7 +114,7 @@ def refine_by_tuning(
 
     out = np.zeros_like(labels)
     out[region] = out_vals
-    return _clean_fragments(out, min_size)
+    return _clean_fragments(out, min_size_um3 / np.prod(spacing))
 
 
 def _clean_fragments(out, min_size):
@@ -136,15 +142,16 @@ def refine_with_prior(
     names: dict[int, str | None],
     prior: np.ndarray,
     prior_names: list[str],
+    spacing=(1.0, 1.0, 1.0),
     w_tuning: float = 1.0,
     w_prior: float = 0.5,
     w_smooth: float = 0.15,
     z_smooth: float = 0.5,
     min_corr: float = 0.3,
     min_rel_amp: float = 0.5,
-    grow: int = 2,
+    grow_um: float = 2.0,
     n_iter: int = 5,
-    min_size: int = 20,
+    min_size_um3: float = 20.0,
 ) -> np.ndarray:
     """Refinement as energy minimization, with an anatomical (atlas) prior.
 
@@ -153,7 +160,8 @@ def refine_with_prior(
 
         w_tuning * (1 - corr(r_x, tuning_l))       odor tuning match
       + w_prior  * -log(p_l(x) + eps)              atlas: is l expected here?
-      + w_smooth * (# 6-neighbors with another label; z-neighbors x z_smooth)
+      + w_smooth * (# 6-neighbors with another label; z-neighbors x z_smooth,
+                    times the xy/z voxel size ratio when z is coarser)
 
     and leaving x unassigned costs the same as an ROI with corr = min_corr
     and a neutral prior p = 0.5. So a voxel where the atlas strongly expects
@@ -175,7 +183,7 @@ def refine_with_prior(
     T = T - T.mean(1, keepdims=True)
     T /= np.linalg.norm(T, axis=1, keepdims=True) + 1e-8
 
-    cand = expand_labels(labels, grow)
+    cand = expand_labels(labels, grow_um, spacing=spacing)
     region = cand > 0
     V = _voxel_vectors(responses)[region]
     raw = np.moveaxis(responses, 0, -1)[region]
@@ -198,7 +206,7 @@ def refine_with_prior(
 
     # only own ROI and adjacent ROIs are allowed per voxel
     own_k = np.searchsorted(labs, cand[region]) + 1
-    nb = neighbors(labels, gap=grow + 1)
+    nb = neighbors(labels, grow_um + max(spacing[1:]), spacing)
     allowed = np.zeros((K + 1, K + 1), bool)
     allowed[:, 0] = True
     for k, l in enumerate(labs):
@@ -211,7 +219,7 @@ def refine_with_prior(
     # 6-neighborhood, z-neighbors down-weighted for anisotropic voxels
     kern = np.zeros((3, 3, 3), np.float32)
     kern[1, 0, 1] = kern[1, 2, 1] = kern[1, 1, 0] = kern[1, 1, 2] = 1.0
-    kern[0, 1, 1] = kern[2, 1, 1] = z_smooth
+    kern[0, 1, 1] = kern[2, 1, 1] = z_smooth * min(1.0, max(spacing[1:]) / spacing[0])
     total = kern.sum()
 
     vals = np.concatenate([[0], labs])
@@ -227,13 +235,13 @@ def refine_with_prior(
         L[region] = new
         if changed == 0:
             break
-    return _clean_fragments(L, min_size)
+    return _clean_fragments(L, min_size_um3 / np.prod(spacing))
 
 
 # ---------------------------------------------------------------- metrics
 
 
-def crosstalk_report(responses: np.ndarray, labels: np.ndarray) -> dict:
+def crosstalk_report(responses: np.ndarray, labels: np.ndarray, spacing=(1.0, 1.0, 1.0)) -> dict:
     """Signal-isolation metrics for a set of ROIs.
 
     coherence[A]   mean correlation of A's voxels with A's mean tuning
@@ -255,7 +263,7 @@ def crosstalk_report(responses: np.ndarray, labels: np.ndarray) -> dict:
         tc = (t - t.mean()) / (np.linalg.norm(t - t.mean()) + 1e-8)
         coherence[int(lab)] = float((V[m] @ tc).mean())
 
-    nb = neighbors(labels)
+    nb = neighbors(labels, spacing=spacing)
     neighbor_corr, leak = {}, {}
     for a, bs in nb.items():
         border = labels == a
