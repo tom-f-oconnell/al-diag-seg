@@ -39,14 +39,28 @@ def _img(a, spacing):
     return _ants().from_numpy(np.ascontiguousarray(a, dtype=np.float32), spacing=tuple(float(s) for s in spacing))
 
 
-def register(moving, fixed, moving_spacing, fixed_spacing, transform: str = "SyN", seed: int = 0) -> list[str]:
+def set_deterministic(seed: int = 1):
+    """Makes every later ANTs registration repeatable from run to run, at about 4-5x
+    the time: a fixed seed for ANTs' sampling, and one ITK thread, since runs with
+    more threads differ even when seeded. Call before the first registration.
+
+    Otherwise ANTs seeds from the clock and uses all cores. (ANTsPy ignores a
+    ``random_seed`` argument to ``ants.registration``; the seed is this global
+    setting. ANTs treats a seed of 0 as no seed.)
+    """
+    if seed == 0:
+        raise ValueError("ANTs treats seed 0 as unseeded")
+    _ants().config.set_ants_deterministic(True, seed)
+
+
+def register(moving, fixed, moving_spacing, fixed_spacing, transform: str = "SyN") -> list[str]:
     """ANTs transform files that warp ``moving`` onto ``fixed``, in physical space.
 
     transform: "Affine" for flies that differ mainly by pose, "SyN" (affine +
     deformable) when glomerulus layout also varies, "Rigid" within a fly.
     """
     reg = _ants().registration(fixed=_img(fixed, fixed_spacing), moving=_img(moving, moving_spacing),
-                               type_of_transform=transform, random_seed=seed)
+                               type_of_transform=transform)
     return reg["fwdtransforms"]
 
 
@@ -110,8 +124,7 @@ def orient_hires(fly, transform: str = "Rigid") -> tuple[bool, tuple[float, floa
     fixed = _img(fly["average"], fly["spacing"])
     scores = []
     for stack in (h["anatomy"], h["anatomy"][..., ::-1]):
-        reg = ants.registration(fixed=fixed, moving=_img(stack, h["spacing"]), type_of_transform=transform,
-                                random_seed=0)
+        reg = ants.registration(fixed=fixed, moving=_img(stack, h["spacing"]), type_of_transform=transform)
         scores.append(float(ants.image_mutual_information(fixed, reg["warpedmovout"])))
     mirrored = scores[1] < scores[0]
     if mirrored:

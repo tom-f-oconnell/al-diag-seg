@@ -192,8 +192,7 @@ def _register_labels(labels, atl, label_of, shared, seed):
         lut[label_of[n]] = v
     moving = ndi.gaussian_filter(lut[labels], 1.0)
     f, m = _img(fixed, atl.spacing), _img(moving, atl.spacing)
-    reg = ants.registration(fixed=f, moving=m, type_of_transform="SyNOnly", syn_metric="meansquares",
-                            random_seed=seed)
+    reg = ants.registration(fixed=f, moving=m, type_of_transform="SyNOnly", syn_metric="meansquares")
     warped = ants.apply_transforms(fixed=f, moving=_img(labels.astype(np.float32), atl.spacing),
                                    transformlist=reg["fwdtransforms"], interpolator="genericLabel")
     return np.rint(warped.numpy()).astype(labels.dtype)

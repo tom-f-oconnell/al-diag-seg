@@ -13,6 +13,8 @@ Runs three times, into syn_results/:
                held-out flies, to score them)
   dropped_ref  the same plus the synthetic reference atlas (syn/reference), the only
                source of G03 and G11 then
+
+Options after smoke_test.py are passed on to every run, e.g. --deterministic.
 """
 import csv
 import json
@@ -27,6 +29,7 @@ import run_pipeline
 from alseg import atlas, olfdb, segment
 
 VAL = ["Ann_2026-01-01_7", "Ann_2026-01-01_8"]
+EXTRA = sys.argv[1:]
 DROP = ["G03", "G11"]
 _state = {"drop": (), "val_labels": [], "mirrored": {}, "odors": None, "rois": {}}
 _orig_load, _orig_orient, _orig_align = olfdb.load, atlas.orient_hires, olfdb.align_odors
@@ -71,7 +74,7 @@ def fake_predict(model, channels, **kw):
 def run(out, drop=(), extra=()):
     print(f"\n=== {out}")
     _state["drop"], _state["val_labels"] = drop, []
-    sys.argv = ["run_pipeline.py", "syn", "--val", *VAL, "--out", out, "--cpu", *extra]
+    sys.argv = ["run_pipeline.py", "syn", "--val", *VAL, "--out", out, "--cpu", *extra, *EXTRA]
     run_pipeline.main()
 
 

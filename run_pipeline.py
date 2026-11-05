@@ -140,6 +140,13 @@ def main():
                    help="weight of the atlas prior relative to odor tuning in refinement. Higher "
                         "lets the atlas overrule tuning more; on synthetic data >= 1 shrinks or "
                         "drops ROIs.")
+    g.add_argument("--deterministic", action="store_true",
+                   help="make the ANTs registrations (atlas, anatomical stacks, --ref) repeatable "
+                        "from run to run, with a fixed seed and one thread, which makes registration "
+                        "about 4-5x slower. "
+                        "Otherwise they use all cores and differ slightly between runs, which can "
+                        "change close calls (e.g. whether a stack gets mirrored, or which glomeruli "
+                        "a --ref fit leaves out). Doesn't affect Cellpose.")
 
     g = ap.add_argument_group(
         "fixed reference atlases",
@@ -174,6 +181,8 @@ def main():
         ap.error("--ref needs the atlas (drop --no-atlas)")
     if a.skip_train and a.model is None:
         ap.error("--skip-train needs --model")
+    if a.deterministic:
+        atlas.set_deterministic()
 
     if not olfdb.is_export(a.data):
         ap.error(f"{a.data} has no {olfdb.MANIFEST}: give the folder of an unzipped export from the "
