@@ -58,6 +58,7 @@ class Options:
     tentative: bool = True
     gpu: bool | None = None  # None: if PyTorch sees one
     segmenter: str = "cellpose"
+    batch_size: int = 8  # Cellpose's training batches to start with, halved while one does not fit in the GPU
 
 
 def use_gpu(gpu: bool | None) -> bool:
@@ -337,7 +338,7 @@ def fit(flies, val=(), options: Options | None = None, out=None, progress=None, 
         seg = str(weights)
     else:
         seg, _, _ = segment.train(train_f, val_f, out or ".", n_epochs=o.epochs, erode=o.erode, gpu=use_gpu(o.gpu),
-                                  xy_um=xy_um, progress=progress)
+                                  xy_um=xy_um, progress=progress, batch_size=o.batch_size)
     durations["train"] = time.time() - t
     template = identity.build_template(train_f)
     atl = None

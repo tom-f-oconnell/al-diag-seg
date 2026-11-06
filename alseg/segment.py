@@ -157,34 +157,66 @@ def train(
     pretrained_model: str = "cpsam_v2",
     xy_um: float | None = None,
     progress=None,
+    batch_size: int = 8,
 ):
     """Fine-tune Cellpose, on slices resampled to ``xy_um`` pixels if given.
     Returns the path of the saved model, and the training and validation losses.
-    ``progress``: called as ``progress("train", epochs done, n_epochs)``, every 10 epochs."""
+    ``progress``: called as ``progress("train", epochs done, n_epochs)``, every 10 epochs.
+    ``batch_size``: the slices per training step to start with, halved (and training started
+    again) while a step does not fit in the GPU's memory. Cellpose-SAM, trained in float32 on
+    256-pixel tiles, takes about 4.7 GiB and 3.3 GiB per slice of a batch: 4 at most on 24 GiB."""
+    import gc
+
     from cellpose import models, train as cp_train
 
     Xtr, Ytr = augment(*make_training_slices(train_flies, erode=erode, xy_um=xy_um))
     Xva, Yva = make_training_slices(val_flies, erode=erode, xy_um=xy_um)
-    model = models.CellposeModel(gpu=gpu, pretrained_model=pretrained_model)
-    with _epochs(progress, n_epochs):
-        path, train_losses, val_losses = cp_train.train_seg(
-            model.net,
-            train_data=Xtr,
-            train_labels=Ytr,
-            test_data=Xva,
-            test_labels=Yva,
-            channel_axis=-1,
-            n_epochs=n_epochs,
-            learning_rate=learning_rate,
-            weight_decay=0.1,
-            batch_size=8,
-            min_train_masks=1,
-            save_path=str(save_dir),
-            model_name=model_name,
-        )
+    Path(save_dir).mkdir(parents=True, exist_ok=True)  # (Cellpose makes only its models/ in it)
+    while True:
+        model = models.CellposeModel(gpu=gpu, pretrained_model=pretrained_model)
+        try:
+            with _epochs(progress, n_epochs):
+                path, train_losses, val_losses = cp_train.train_seg(
+                    model.net,
+                    train_data=Xtr,
+                    train_labels=Ytr,
+                    test_data=Xva,
+                    test_labels=Yva,
+                    channel_axis=-1,
+                    n_epochs=n_epochs,
+                    learning_rate=learning_rate,
+                    weight_decay=0.1,
+                    batch_size=batch_size,
+                    min_train_masks=1,
+                    save_path=str(save_dir),
+                    model_name=model_name,
+                )
+            break
+        except Exception as e:  # noqa: BLE001 (only CUDA's out of memory is caught: torch is imported by cellpose)
+            if not (gpu and _out_of_memory(e)) or batch_size == 1:
+                raise
+        # (out of the except block, so that its traceback's tensors can be freed)
+        del model
+        gc.collect()
+        _empty_cuda_cache()
+        batch_size //= 2
+        print(f"a training batch does not fit in the GPU's memory: starting again with batches of {batch_size}")
+    print(f"trained in batches of {batch_size}")
     if progress:
         progress("train", n_epochs, n_epochs)
     return path, train_losses, val_losses
+
+
+def _out_of_memory(e: BaseException) -> bool:
+    import torch
+
+    return isinstance(e, torch.cuda.OutOfMemoryError)
+
+
+def _empty_cuda_cache() -> None:
+    import torch
+
+    torch.cuda.empty_cache()
 
 
 def predict(

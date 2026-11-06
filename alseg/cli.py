@@ -113,6 +113,9 @@ def _parser() -> argparse.ArgumentParser:
 
     g = ap.add_argument_group("segmentation model")
     g.add_argument("--epochs", type=int, default=200, metavar="N", help="Cellpose fine-tuning epochs")
+    g.add_argument("--batch-size", type=int, default=8, metavar="N",
+                   help="Cellpose's training batches to start with (slices each), halved while one does not fit in "
+                        "the GPU's memory (Cellpose-SAM: 4 at most on 24 GiB)")
     g.add_argument("--xy-um", type=float, metavar="UM",
                    help="in-plane pixel size (um) the model works at. Every fly's planes are "
                         "resampled in-plane to it, and predictions back; planes are never "
@@ -222,7 +225,7 @@ def fit_main(argv=None):
         model = Model.load(a.model)
         print("loaded model", a.model)
     else:
-        o = Options(epochs=a.epochs, erode=a.erode, xy_um=a.xy_um or (model_xy_um(a.model) if a.skip_train else None),
+        o = Options(epochs=a.epochs, batch_size=a.batch_size, erode=a.erode, xy_um=a.xy_um or (model_xy_um(a.model) if a.skip_train else None),
                     atlas=not a.no_atlas, reg=a.reg, hires_reg=a.hires_reg, atlas_um=a.atlas_um, w_prior=a.w_prior,
                     refs=[str(r) for r in a.ref], ref_side=a.ref_side, ref_reg=a.ref_reg, ref_weight=a.ref_weight,
                     tentative=not a.no_tentative, gpu=False if a.cpu else None, segmenter=a.segmenter)
