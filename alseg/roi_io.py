@@ -1,10 +1,19 @@
-"""Convert ImageJ RoiSets drawn on individual z-slices into 3D label volumes.
+"""ImageJ RoiSets drawn on individual z-slices to 3D label volumes, and back.
 
 Each ROI in the RoiSet is a polygon on one z-slice. ROIs that share a name
 (e.g. "DM2") are merged into one 3D object. If ROI names are not glomerulus
 names (ImageJ's default names look like "0012-0123-0456"), set
 ``link_unnamed=True`` and per-slice ROIs are linked into 3D objects by
 overlap between neighboring slices instead.
+
+Names are kept as written, but for a suffix after the glomerulus name (``DA1_t0``,
+``DM2_z12``, ``DM2 (3)`` are DA1 and DM2): the database's names are case-sensitive
+(``DA4l``, ``VA1d``), so they are not changed.
+
+An ROI covers the pixels whose centers are inside its polygon, with pixel (y, x)'s center
+at ImageJ coordinates (x, y), as hong2p (al_analysis) reads them, so masks here are the
+ones the database's responses were computed in. `write_roiset` writes outlines that are
+read back to the same masks.
 """
 from __future__ import annotations
 
@@ -14,6 +23,8 @@ from pathlib import Path
 
 import numpy as np
 import roifile
+from scipy.ndimage import binary_fill_holes
+from scipy.ndimage import label as ndi_label
 from skimage.draw import polygon as draw_polygon
 
 # ImageJ's auto-generated names: "ssss-yyyy-xxxx" or "cccc-ssss-yyyy-xxxx" ...
@@ -114,9 +125,8 @@ def load_roiset(
 
 
 def _clean_name(name: str) -> str:
-    # "DM2_z12", "DM2 (3)", "dm2" -> "DM2". Adjust to your lab's naming scheme.
-    name = re.split(r"[_\s(]", name.strip())[0]
-    return name.upper()
+    # "DM2_z12", "DM2 (3)", "DA1_t0" -> "DM2", "DA1" (case as written: the database's names are case-sensitive)
+    return re.split(r"[_\s(]", name.strip())[0]
 
 
 def _link_by_overlap(items, min_iou):
@@ -151,3 +161,42 @@ def build_name_table(roi_paths, shapes, keep=None) -> dict[str, int]:
         _, lut, _ = load_roiset(p, s, keep=keep)
         names |= set(lut.values())
     return {n: i + 1 for i, n in enumerate(sorted(names))}
+
+
+def _outlines(mask: np.ndarray) -> list[np.ndarray]:
+    """(N, 2) x, y outlines of each connected piece of a 2D mask (holes filled), which
+    `roi_to_mask2d` turns back into those pieces."""
+    from skimage.measure import find_contours
+
+    out = []
+    pieces, n = ndi_label(mask)
+    for k in range(1, n + 1):
+        piece = binary_fill_holes(pieces == k)
+        # marching squares at 0.5 between pixel centers, so each pixel of the piece has its
+        # center inside, and no other pixel does
+        c = max(find_contours(np.pad(piece, 1).astype(float), 0.5), key=len) - 1
+        out.append(np.ascontiguousarray(c[:, ::-1], np.float32))
+    return out
+
+
+def write_roiset(labels: np.ndarray, names: dict[int, str | None], path: str | Path) -> int:
+    """Writes a (Z, Y, X) label volume as an ImageJ RoiSet.zip: a polygon ROI per label and
+    plane (one per connected piece, if a label is in several on a plane), named
+    ``names[label]``, or the label's number for one without a name (as numbered ROIs, they
+    are not glomeruli to the database), with its plane as a hyperstack Z, as al_analysis'
+    RoiSets have them. Returns how many ROIs were written.
+    """
+    path = Path(path)
+    if path.exists():
+        path.unlink()
+    n = 0
+    for z in range(labels.shape[0]):
+        for lab in np.unique(labels[z]):
+            if lab == 0:
+                continue
+            for xy in _outlines(labels[z] == lab):
+                roi = roifile.ImagejRoi.frompoints(xy, name=names.get(int(lab)) or str(int(lab)), z=z)  # (0-based: written 1-based)
+                roi.roitype = roifile.ROI_TYPE.POLYGON
+                roi.tofile(path, name=f"{n:04d}-{z + 1:04d}-{int(lab):04d}.roi")
+                n += 1
+    return n

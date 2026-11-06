@@ -30,7 +30,7 @@ from .roi_io import _clean_name
 @dataclass
 class Reference:
     labels: np.ndarray  # (Z, Y, X) int
-    names: dict[int, str]  # label -> glomerulus name, cleaned like ROI names
+    names: dict[int, str]  # label -> glomerulus name, cleaned like ROI names (see `canonical`)
     spacing: tuple[float, float, float]  # (z, y, x) um
     side: str | None = None
 
@@ -237,14 +237,22 @@ def add_to_atlas(atl: Atlas, ref: Reference, transform: str = "SyN", weight: flo
     return replace(atl, prob=np.stack(prob), names=names, counts=np.array(counts, float)), info
 
 
+def canonical(ref: Reference, names) -> Reference:
+    """The reference with each glomerulus named as in ``names`` (e.g. the atlas's: the
+    database's) where they differ only in case (``DA4L`` -> ``DA4l``)."""
+    folded = {n.casefold(): n for n in names}
+    return replace(ref, names={l: folded.get(n.casefold(), n) for l, n in ref.names.items()})
+
+
 def add_best_side(atl: Atlas, folder, side: str | None = None, **kw) -> tuple[Atlas, dict]:
     """add_to_atlas with the side (of a two-sided reference) whose centroids fit the
-    atlas best, unless ``side`` is given."""
+    atlas best, unless ``side`` is given. The reference's names are matched to the
+    atlas's whatever their case (`canonical`)."""
     cands = [side] if side else sides(folder)
     ac = _atlas_centroids(atl)
     best = None
     for s in cands:
-        ref = load_reference(folder, s)
+        ref = canonical(load_reference(folder, s), atl.names)
         try:
             *_, kept, res, _ = _fit(ref, atl, ac)
         except ValueError:

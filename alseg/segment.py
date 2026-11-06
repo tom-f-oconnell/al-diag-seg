@@ -14,6 +14,9 @@ works the same way but takes a ``channels`` argument and a ``model_type``.
 """
 from __future__ import annotations
 
+import logging
+import re
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -117,6 +120,31 @@ def augment(imgs, masks, seed=0):
     return imgs + A, masks + B
 
 
+@contextmanager
+def _epochs(progress, n_epochs: int):
+    """Calls ``progress("train", epoch, n_epochs)`` as Cellpose logs its training (at epoch
+    5, and every 10)."""
+    if progress is None:
+        yield
+        return
+
+    class Handler(logging.Handler):
+        def emit(self, record):
+            m = re.match(r"(\d+), train_loss=", record.getMessage())
+            if m:
+                progress("train", int(m[1]) + 1, n_epochs)
+
+    log, h = logging.getLogger("cellpose.train"), Handler()
+    level = log.level
+    log.setLevel(logging.INFO)
+    log.addHandler(h)
+    try:
+        yield
+    finally:
+        log.removeHandler(h)
+        log.setLevel(level)
+
+
 def train(
     train_flies,
     val_flies,
@@ -128,29 +156,34 @@ def train(
     gpu: bool = True,
     pretrained_model: str = "cpsam_v2",
     xy_um: float | None = None,
+    progress=None,
 ):
     """Fine-tune Cellpose, on slices resampled to ``xy_um`` pixels if given.
-    Returns the path of the saved model, and the training and validation losses."""
+    Returns the path of the saved model, and the training and validation losses.
+    ``progress``: called as ``progress("train", epochs done, n_epochs)``, every 10 epochs."""
     from cellpose import models, train as cp_train
 
     Xtr, Ytr = augment(*make_training_slices(train_flies, erode=erode, xy_um=xy_um))
     Xva, Yva = make_training_slices(val_flies, erode=erode, xy_um=xy_um)
     model = models.CellposeModel(gpu=gpu, pretrained_model=pretrained_model)
-    path, train_losses, val_losses = cp_train.train_seg(
-        model.net,
-        train_data=Xtr,
-        train_labels=Ytr,
-        test_data=Xva,
-        test_labels=Yva,
-        channel_axis=-1,
-        n_epochs=n_epochs,
-        learning_rate=learning_rate,
-        weight_decay=0.1,
-        batch_size=8,
-        min_train_masks=1,
-        save_path=str(save_dir),
-        model_name=model_name,
-    )
+    with _epochs(progress, n_epochs):
+        path, train_losses, val_losses = cp_train.train_seg(
+            model.net,
+            train_data=Xtr,
+            train_labels=Ytr,
+            test_data=Xva,
+            test_labels=Yva,
+            channel_axis=-1,
+            n_epochs=n_epochs,
+            learning_rate=learning_rate,
+            weight_decay=0.1,
+            batch_size=8,
+            min_train_masks=1,
+            save_path=str(save_dir),
+            model_name=model_name,
+        )
+    if progress:
+        progress("train", n_epochs, n_epochs)
     return path, train_losses, val_losses
 
 

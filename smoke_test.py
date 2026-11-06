@@ -14,6 +14,11 @@ Runs three times, into syn_results/:
   dropped_ref  the same plus the synthetic reference atlas (syn/reference), the only
                source of G03 and G11 then
 
+Then fits a model with the stand-in segmenter and no atlas (syn_results/stand_in), and runs
+it with alseg-predict on a held-out fly twice: as a fly of the export, and from its own
+folders as al_analysis leaves them. Both have to give the same RoiSet.zip, of the
+database's glomerulus names (and numbered ROIs).
+
 Options after smoke_test.py are passed on to every run, e.g. --deterministic.
 """
 import csv
@@ -109,3 +114,22 @@ print(f"\nROIs, odors and the orientation of {len(_state['mirrored'])} anatomica
 print(f"{' '.join(DROP)} named correctly in held-out flies:")
 for out in ("syn_results/dropped", "syn_results/dropped_ref"):
     print(f"  {out}: {dropped_named(out)}")
+
+# a saved model, loaded and run on a fly of the export, and on the fly's own folders
+import roifile  # noqa: E402
+
+from alseg import cli  # noqa: E402
+
+_state["drop"] = ()
+cli.fit_main(["syn", "--val", *VAL, "--out", "syn_results/stand_in", "--segmenter", "stand-in", "--no-atlas", "--cpu"])
+fly = next(f for f in json.loads(Path("syn/roi_training.json").read_text())["flies"] if f"{f['date']}_{f['fly_num']}" in VAL[1])
+cli.predict_main(["syn_results/stand_in/model", "--export", "syn", "--flies", VAL[1], "--out", "syn_results/predict_export"])
+cli.predict_main(["syn_results/stand_in/model", "--fly", f"syn/{fly['dir']}", "--raw", f"syn/{fly['raw_dir']}",
+                  "--out", "syn_results/predict_fly"])
+a = Path(f"syn_results/predict_export/{VAL[1]}_RoiSet.zip")
+b = Path(f"syn_results/predict_fly/2026-01-01_{fly['fly_num']}_RoiSet.zip")
+assert a.read_bytes() == b.read_bytes(), "the export's fly and its own folders were segmented differently"
+names = {r.name for r in roifile.ImagejRoi.fromfile(a)}
+assert names <= set(make_synthetic.NAMES) | {n for n in names if n.isdigit()} and names & set(make_synthetic.NAMES), names
+print(f"model saved, loaded and run on {VAL[1]} as a fly of the export and from its own folders: the same "
+      f"RoiSet.zip ({len(names)} names)")

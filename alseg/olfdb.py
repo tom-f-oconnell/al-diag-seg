@@ -1,6 +1,6 @@
 """Flies from an olfdb (hong-data) ROI training export, as ``run_pipeline.load_fly`` gives them.
 
-The export (the database's ROI training tab) is a folder with ``roi_training.json`` and every
+The export (the database's AL Segmentation tab) is a folder with ``roi_training.json`` and every
 file where it is on tensor, as al_analysis leaves it there. Per fly:
 
 * each diagnostic recording's ``trialmean_dff.tif`` (odor, Z, Y, X: mean dF/F of each odor)
@@ -16,6 +16,10 @@ file where it is on tensor, as al_analysis leaves it there. Per fly:
 The manifest names each recording's odors as in the database's odor table, so the same odor
 has one name in every fly. A fly's responses are its recordings' ``trialmean_dff.tif`` one
 after another, and `align_odors` puts every fly's in one order.
+
+Paths in the manifest are from the folder it is in, or absolute (as the database writes
+them for a fit it runs itself, reading the files where they are on tensor), and
+`load_export` takes the folder or the manifest itself.
 """
 from __future__ import annotations
 
@@ -36,8 +40,14 @@ _CHAN_A = re.compile(r"ChanA_(\d+)_(\d+)_(\d+)_(\d+)\.tiff?")
 TENTATIVE = re.compile(r"_t\d+$")
 
 
+def manifest_path(path) -> Path:
+    """The manifest of an export: ``path`` itself if it is a file, else ``path``/`MANIFEST`."""
+    path = Path(path)
+    return path if path.is_file() else path / MANIFEST
+
+
 def is_export(d: Path) -> bool:
-    return (Path(d) / MANIFEST).is_file()
+    return manifest_path(d).is_file()
 
 
 def fly_name(entry: dict) -> str:
@@ -47,19 +57,22 @@ def fly_name(entry: dict) -> str:
 
 
 def manifest(root: Path) -> dict:
-    return json.loads((Path(root) / MANIFEST).read_text())
+    return json.loads(manifest_path(root).read_text())
 
 
 def fly_entries(root: Path) -> list[dict]:
-    """The manifest's flies whose files all came (others are listed, and left out)."""
+    """The manifest's flies whose files all came (others are listed, and left out), each
+    with its ``name`` (`fly_name`, made unique with -2, -3, ... where two would share one)."""
     m = manifest(root)
-    out = []
+    out, seen = [], {}
     for f in m["flies"]:
         if f.get("failed"):
             print(f"  {fly_name(f)} left out: {len(f['failed'])} of its files could not be exported "
                   f"({'; '.join(f'{k}: {v}' for k, v in list(f['failed'].items())[:2])})")
-        else:
-            out.append(f)
+            continue
+        name = fly_name(f)
+        seen[name] = seen.get(name, 0) + 1
+        out.append({**f, "name": name if seen[name] == 1 else f"{name}-{seen[name]}"})
     return out
 
 
@@ -91,6 +104,17 @@ def roi_keeper(glomeruli: set[str], tentative: bool = True):
     return keep
 
 
+def finite(x: np.ndarray, what) -> np.ndarray:
+    """``x`` with values that are not finite (NaN, inf) set to 0: al_analysis' dF/F has them at
+    the odd voxel whose baseline is 0, and one breaks the PCA, correlation and refinement.
+    Says how many there were."""
+    bad = ~np.isfinite(x)
+    if bad.any():
+        print(f"  {what}: {int(bad.sum())} values not finite (NaN or inf), taken as 0")
+        x = np.where(bad, 0, x).astype(x.dtype)
+    return x
+
+
 def read_stack(d: Path) -> np.ndarray:
     """A ThorImage anatomical stack: (Z, Y, X) float32, the mean of the frames of each plane.
     From its ``ChanA_*.tif`` files, else its ``.raw`` (through hong2p)."""
@@ -113,10 +137,10 @@ def load(root: Path, entry: dict, name_table=None, keep=None) -> dict:
     """One fly of the export (see the module's docstring), with ``odors``: the name of each
     of its response channels. ``keep``: which ROIs to train on (`roi_keeper`)."""
     root = Path(root)
-    avg = tifffile.imread(root / entry["average"]).astype(np.float32)
+    avg = finite(tifffile.imread(root / entry["average"]).astype(np.float32), entry["average"])
     resp, odors = [], []
     for r in entry["recordings"]:
-        x = tifffile.imread(root / r["responses"]).astype(np.float32)
+        x = finite(tifffile.imread(root / r["responses"]).astype(np.float32), r["responses"])
         x = x[None] if x.ndim == 3 else x
         assert x.shape[0] == len(r["odors"]) and x.shape[1:] == avg.shape, (
             f"{r['responses']}: {x.shape}, but {len(r['odors'])} odors and average image {avg.shape}")
@@ -124,7 +148,7 @@ def load(root: Path, entry: dict, name_table=None, keep=None) -> dict:
         odors += r["odors"]
     labels, lut, overlap = roi_io.load_roiset(root / entry["roiset"], avg.shape, name_table, keep=keep)
     xml = next(root / r["experiment_xml"] for r in entry["recordings"] if r.get("experiment_xml"))
-    f = {"name": fly_name(entry), "average": avg, "responses": np.concatenate(resp), "odors": odors,
+    f = {"name": entry.get("name") or fly_name(entry), "average": avg, "responses": np.concatenate(resp), "odors": odors,
          "labels": labels, "lut": lut, "overlap": overlap, "spacing": metadata.thorimage_spacing(xml, avg.shape)}
     if entry.get("stacks"):
         s = entry["stacks"][0]
@@ -149,3 +173,39 @@ def align_odors(flies: list[dict]) -> list[str]:
         f["responses"] = np.stack([f["responses"][idx[o]].mean(0) for o in common]).astype(np.float32)
         f["odors"] = common
     return common
+
+
+def load_export(path, tentative: bool = True, progress=None) -> dict:
+    """Every fly of an export (`fly_entries`, `load`), their odors in one order
+    (`align_odors`), and what a model fit to them keeps of the export.
+
+    Args:
+        path: the export's folder, or its manifest.
+        tentative: train on tentative ROIs (``DA1_t0``) as that glomerulus (`roi_keeper`).
+        progress: called as ``progress("load", flies loaded, flies)``.
+
+    Returns:
+        dict with ``flies``; ``odors`` (the ones of every fly, in their order);
+        ``aliases``: each odor's name as recorded (in ``trial_frames_and_odors.json``) ->
+        as the database names it, so a new fly's odors can be named alike; ``name_table``
+        (glomerulus -> label, shared by every fly); ``glomeruli``: the names the database
+        accepts (the export's).
+    """
+    path = Path(path)
+    root = manifest_path(path).parent
+    m = manifest(path)
+    entries = fly_entries(path)
+    keep = roi_keeper(set(m["glomeruli"]), tentative=tentative)
+    name_table = roi_io.build_name_table([root / e["roiset"] for e in entries], [tuple(e["shape"]) for e in entries],
+                                         keep=keep)
+    flies = []
+    for i, e in enumerate(entries):
+        flies.append(load(root, e, name_table, keep))
+        if progress:
+            progress("load", i + 1, len(entries))
+    odors = align_odors(flies)
+    aliases = {}
+    for e in entries:
+        for r in e["recordings"]:
+            aliases.update(zip(r.get("as_recorded") or r["odors"], r["odors"]))
+    return {"flies": flies, "odors": odors, "aliases": aliases, "name_table": name_table, "glomeruli": m["glomeruli"]}

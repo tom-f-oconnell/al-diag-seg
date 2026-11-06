@@ -6,20 +6,49 @@ the approach in the "Glomerulus ROI segmentation: recommended approach" doc. Its
 is the odor response database's ([hong-data](https://github.com/ejhonglab/hong-data))
 ROI training download, as al_analysis leaves the data on tensor.
 
+The odor response database can also fit models itself (its AL Segmentation tab), and
+gives each fit's model to download, to run on your own flies as below.
+
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then:
 ```
 uv sync   # Python 3.13 env with cellpose 4.x; training needs a GPU
 ```
 Run the commands below with `uv run python ...`, or activate the env first. uv puts
 it in `./.venv`, or in `./venv` if `UV_PROJECT_ENVIRONMENT=venv` is set. Python 3.14
-won't work until antspyx ships wheels for it.
+won't work until antspyx ships wheels for it. Or install it into another environment with
+pip (hong2p comes from GitHub too):
+```
+pip install "hong2p @ git+https://github.com/ejhonglab/hong2p" "al-diag-seg @ git+https://github.com/tom-f-oconnell/al-diag-seg"
+```
+which gives the commands `alseg-fit` (the same as `python run_pipeline.py`) and
+`alseg-predict`.
+
+## Running a model on your flies
+
+A fit (`alseg-fit`, or the database's) writes its model to a folder (`model/`). To segment
+flies of your own with it, give their motion-corrected data folders as al_analysis leaves
+them (their diagnostic recordings' `trialmean_dff.tif` and `trial_frames_and_odors.json`,
+and `mocorr_concat_avg.tif` or `mocorr_concat.tif`), and their raw data folders (voxel
+sizes from `Experiment.xml`, and an `anat/` stack if there is one):
+```
+alseg-predict model/ --fly /local/tensor/Ann/analysis/2026-03-31/1 --raw /local/tensor/Ann/raw/2026-03-31/1 --out pred/
+```
+Each fly's `<fly>_RoiSet.zip` has its ROIs named by glomerulus (numbered where none
+fits), per plane, as ImageJ and al_analysis read them. Its odors are matched to the
+model's by their names as recorded; it needs all of them (the ones it lacks are listed).
+It runs on a CPU too (slower). Flies with a `RoiSet.zip` of their own are also scored
+against it. `alseg-predict -h` has the rest (e.g. `--export`, for flies of a database
+download).
 
 ## Files
 
 | File | What it does |
 |---|---|
+| `alseg/model.py` | `fit`: the whole model (Cellpose weights, PCA basis, identity template, atlas, odors); `Model.save`/`load` (a folder); `Model.predict` (a fly → ROIs of each kind, named); `Model.evaluate` (scores against a fly's own ROIs, per fly and per glomerulus). |
+| `alseg/fly.py` | A fly from its folders as al_analysis leaves them (not a download), with its odors matched to a model's, to run the model on. |
+| `alseg/cli.py` | The commands: `alseg-fit` (`run_pipeline.py`) and `alseg-predict`. |
 | `alseg/olfdb.py` | Reads the database's ROI training download: per fly, its diagnostic recordings' `trialmean_dff.tif` one after another, lined up by odor with every other fly's (odors named alike by the database), its anatomy, its RoiSet's glomeruli (as the database tells them from other ROIs), voxel sizes from `Experiment.xml`, and its anatomical stack from ThorImage's `ChanA_*.tif` files. |
-| `alseg/roi_io.py` | RoiSet.zip → `(Z, Y, X)` label volume. ROIs sharing a glomerulus name across slices become one 3D object. Falls back to linking by slice-to-slice overlap if ROIs have ImageJ's default numeric names. Overlapping voxels are returned separately. |
+| `alseg/roi_io.py` | RoiSet.zip → `(Z, Y, X)` label volume, and back (`write_roiset`: a polygon per label and plane, named, which reads back to the same voxels). ROIs sharing a glomerulus name across slices become one 3D object. Falls back to linking by slice-to-slice overlap if ROIs have ImageJ's default numeric names. Overlapping voxels are returned separately. |
 | `alseg/responses.py` | Per-voxel 24-odor response vectors (from a raw movie + onsets, or precomputed), local-correlation map, a PCA basis shared across flies, and the 3 input channels. |
 | `alseg/metadata.py` | Voxel sizes from ThorImage `Experiment.xml` files, via [hong2p](https://github.com/ejhonglab/hong2p). |
 | `alseg/segment.py` | Builds per-slice training data (eroded ROI cores), fine-tunes Cellpose-SAM, predicts slice by slice and stitches into 3D. Every fly's planes are resampled in-plane (never in z) to one pixel size for the model. |
@@ -28,12 +57,12 @@ won't work until antspyx ships wheels for it.
 | `alseg/reference.py` | Adds a fixed reference atlas (labels only, e.g. Grabe et al. 2016 or hemibrain) to the training-fly atlas, aligned by its labels; see [below](#fixed-reference-atlases). |
 | `alseg/identity.py` | Builds a per-glomerulus template (tuning, position, shape) from labeled flies and names new ROIs. Cost = tuning + position + shape (Mahalanobis on log volume and axis lengths) + atlas overlap + layout (offsets to neighbors vs. template offsets, re-solved iteratively). Poor matches stay unassigned. |
 | `alseg/metrics.py` | IoU/Dice matching, precision/recall, split and merge counts. |
-| `run_pipeline.py` | All of the above, with held-out flies, writing label TIFFs, per-fly identity CSVs and `summary.csv`. |
-| `make_synthetic.py`, `smoke_test.py` | Fake flies as a database download (with numbered and tentative ROIs, an odor one fly lacks, and stacks of right ALs) plus a fake reference atlas, and runs of the pipeline with Cellpose swapped for a stand-in: as is, with two glomeruli unlabeled in the training flies, and that plus the reference (`python make_synthetic.py syn 8 && python smoke_test.py`, no GPU needed). |
+| `run_pipeline.py` | All of the above, with held-out flies: the model (`model/`), and per held-out fly its ROIs (label TIFFs and named RoiSets), identity CSVs; `summary.csv`, `glomeruli.csv`. |
+| `alseg/synthetic.py` (`make_synthetic.py`), `smoke_test.py` | Fake flies as a database download (with numbered and tentative ROIs, an odor one fly lacks, and stacks of right ALs) plus a fake reference atlas, and runs of the pipeline with Cellpose swapped for a stand-in: as is, with two glomeruli unlabeled in the training flies, and that plus the reference; then a saved model run with `alseg-predict` on a fly as a download's and from its own folders (`python make_synthetic.py syn 8 && python smoke_test.py`, no GPU needed). |
 
 ## Data
 
-Download it from the database's ROI training tab (keeping the anatomical stacks, in it
+Download it from the database's AL Segmentation tab (keeping the anatomical stacks, in it
 unless unticked: flies register to each other through them), unzip it, and give its folder:
 ```
 python run_pipeline.py olfdb_roi_training_2026-11-04/ --val Tom_2023-11-19_1 Sam_2026-03-31_1 --out results/
@@ -66,7 +95,10 @@ recorded, while al_analysis mirrors right ALs' functional data left-right, so ea
 placed on its fly's planes both ways and kept the way that fits better (printed). See
 [design.md](design.md) for how this is handled, and the alternatives.
 
-`python run_pipeline.py -h` lists every option, with defaults and examples. Per held-out fly it writes `*_pred.tif`, `*_refined_tuning.tif`, `*_refined_prior.tif`, the warped atlas (`*_atlas_maxprob.tif`), identity CSVs for both refinements, and one `summary.csv` row per ROI set. `--no-atlas` skips the priors.
+`python run_pipeline.py -h` lists every option, with defaults and examples. It saves the model to `model/` (see [above](#running-a-model-on-your-flies)). Per held-out fly it writes `*_pred.tif`, `*_refined_tuning.tif`, `*_refined_prior.tif` and each as a RoiSet named by glomerulus (`*_<kind>_RoiSet.zip`), the warped atlas (`*_atlas_maxprob.tif`), identity CSVs for both refinements; one `summary.csv` row per fly and ROI set (and its manual ROIs' crosstalk, to compare), and `glomeruli.csv`: per glomerulus, in how many held-out flies the final ROIs found it (IoU ≥ 0.5) and named it right. `--no-atlas` skips the priors.
+
+A few voxels of some recordings' `trialmean_dff.tif` are NaN (al_analysis' dF/F where the
+baseline is 0); they are taken as 0, and counted as they are read.
 
 ## Atlas priors: what they do and how to tune them
 
@@ -114,8 +146,11 @@ that export are fragments.
 * **Glomeruli you never labeled** get their own atlas channels, and can be named from
   position, layout and atlas overlap alone (tuning and shape costs set to a neutral
   `unknown_cost`). Shared ones are averaged in as `--ref-weight` (default 1) extra flies.
-* **Names must match** after the same cleanup as ROI names (`DA4l` → `DA4L`). Atlases
-  differ in places: Grabe has VC3 and VP1 where the hemibrain has VC3l/m and VP1d/l/m.
+* **Names must match** the training flies', but for upper and lower case (a reference's
+  `DA4L` is taken as `DA4l`). Atlases differ in places: Grabe has VC3 and VP1 where the
+  hemibrain has VC3l/m and VP1d/l/m. Glomeruli only in a reference whose names the
+  database does not accept (Grabe's VP1) are listed when it is added: ROIs named after
+  them would not be glomeruli to it.
 
 On synthetic data, with G03 and G11 unlabeled in the training flies, atlas-based
 naming got 28/32 ROIs right (0/4 of the two dropped glomeruli); with the reference,
@@ -127,7 +162,7 @@ affine and 0.63 after SyN.
 
 ## Things to check on your data
 
-* **ROI names.** ROIs of one glomerulus on several planes (one name) are one 3D object; `roi_io._clean_name` also maps names like `DM2_z12` or `DM2 (3)` to `DM2`, and uppercases them (`DA4l` → `DA4L`), to match reference atlases.
+* **ROI names.** ROIs of one glomerulus on several planes (one name) are one 3D object; `roi_io._clean_name` also maps names like `DM2_z12` or `DM2 (3)` to `DM2`. Case is kept, as the database's names are case-sensitive (`DA4l`, `VA1d`).
 * **Slice position.** Read from `z_position` (hyperstacks) or `position` (plain stacks), 1-based. An ROI with no position raises an error.
 * **Channels.** Cellpose-SAM takes 3 channels: the average image, local correlation of tuning, PC1 of tuning. Try PCs 1–3 instead if the average image is weak.
 * **Refinement trades size for purity.** On the synthetic data, tuning-only refinement brings border leak from ~0.13 (overshooting ROIs) to 0.04–0.07 (manual: 0.03–0.04), but drops ROIs whose cores are too small or dim. Tune `min_corr`, `margin` and `min_rel_amp` against crosstalk metrics, not Dice alone.

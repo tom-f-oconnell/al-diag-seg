@@ -152,7 +152,7 @@ class Atlas:
 
 
 def build_atlas(flies, transform: str = "SyN", hires_transform: str = "Rigid", atlas_um: float = 1.0,
-                smooth_um: float = 1.0, reference: int | None = None) -> Atlas:
+                smooth_um: float = 1.0, reference: int | None = None, progress=None) -> Atlas:
     """flies: [{"average", "labels", "lut": {label: name}, "spacing", optional "hires":
     {"anatomy", "spacing"}}, ...] (training flies only).
 
@@ -160,7 +160,8 @@ def build_atlas(flies, transform: str = "SyN", hires_transform: str = "Rigid", a
     by default the one sampled most finely in z. ``smooth_um`` blurs each warped mask
     a little, so the prior is soft at borders even with few flies.
     For a less reference-biased template, run this twice, using the first
-    template as the reference the second time.
+    template as the reference the second time. ``progress``: called with how many flies
+    are in the atlas so far, after each.
     """
     if reference is None:
         reference = min(range(len(flies)), key=lambda i: registration_image(flies[i])[1][0])
@@ -185,6 +186,8 @@ def build_atlas(flies, transform: str = "SyN", hires_transform: str = "Rigid", a
                 m = ndi.gaussian_filter(m, sigma)
             acc[idx[name]] += m
             seen[idx[name]] += 1
+        if progress:
+            progress(i + 1)
     prob = acc / np.maximum(seen, 1)[:, None, None, None]
     return Atlas(anat_sum / len(flies), prob.astype(np.float16), names, t_sp, seen)
 

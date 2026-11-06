@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "al-diag-seg"
 version = "0.1.0"
@@ -13,8 +17,17 @@ dependencies = [
     "roifile",
     "cellpose>=4",
     "antspyx",
+    # unpinned: whatever installs this pins it (e.g. the database's requirements.txt, or
+    # [tool.uv.sources] below), as two pins of one git dependency conflict in pip
     "hong2p",
 ]
+
+[project.scripts]
+alseg-fit = "alseg.cli:fit_main"
+alseg-predict = "alseg.cli:predict_main"
+
+[tool.setuptools]
+packages = ["alseg"]
 
 [tool.uv.sources]
 hong2p = { git = "https://github.com/ejhonglab/hong2p" }
