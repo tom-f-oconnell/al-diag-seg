@@ -10,11 +10,10 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import tifffile
 
 from . import atlas, olfdb, roi_io
 from .fly import load_fly
-from .model import Model, Options, fit
+from .model import Model, Options, fit, write_volume
 
 FIT_DOC = """End-to-end example: ImageJ ROIs + odor responses -> trained model -> named, refined ROIs.
 
@@ -313,7 +312,7 @@ def predict_main(argv=None):
         if f.get("labels") is None:
             p = model.predict(f)
             for kind, lab in p["labels"].items():
-                tifffile.imwrite(a.out / f"{f['name']}_{kind}.tif", lab.astype(np.uint16))
+                write_volume(a.out / f"{f['name']}_{kind}.tif", lab.astype(np.uint16))
                 roi_io.write_roiset(lab, {l: v[0] for l, v in p["identities"][kind].items()},
                                     a.out / f"{f['name']}_{kind}_RoiSet.zip")
             with open(a.out / f"{f['name']}_identities.csv", "w", newline="") as fh:

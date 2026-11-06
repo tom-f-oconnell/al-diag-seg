@@ -93,6 +93,12 @@ def version() -> dict:
     return out
 
 
+def write_volume(path, a: np.ndarray) -> None:
+    """A (Z, Y, X) volume as an ImageJ stack of planes (as al_analysis' TIFFs are), so that
+    one of 3 or 4 planes is not taken for a colour image."""
+    tifffile.imwrite(path, a, imagej=True, metadata={"axes": "ZYX"})
+
+
 def _stand_in(fly) -> np.ndarray:
     from skimage.segmentation import expand_labels
 
@@ -225,7 +231,7 @@ class Model:
             lut = f["lut"]
             if out:
                 if p["atlas_maxprob"] is not None:
-                    tifffile.imwrite(out / f"{f['name']}_atlas_maxprob.tif", p["atlas_maxprob"])
+                    write_volume(out / f"{f['name']}_atlas_maxprob.tif", p["atlas_maxprob"])
             ct = refine.crosstalk_report(f["responses"], f["labels"], f["spacing"])
             rows.append({"fly": f["name"], "rois": "manual", "n": len(np.unique(f["labels"])) - 1, "recall": "", "precision": "",
                          "dice": "", "splits": "", "merges": "",
@@ -235,7 +241,7 @@ class Model:
             for kind, lab in p["labels"].items():
                 names = {l: v[0] for l, v in p["identities"][kind].items()}
                 if out:
-                    tifffile.imwrite(out / f"{f['name']}_{kind}.tif", lab.astype(np.uint16))
+                    write_volume(out / f"{f['name']}_{kind}.tif", lab.astype(np.uint16))
                     roi_io.write_roiset(lab, names, out / f"{f['name']}_{kind}_RoiSet.zip")
                 geo = metrics.match_report(f["labels"], lab)
                 ct = refine.crosstalk_report(f["responses"], lab, f["spacing"])
