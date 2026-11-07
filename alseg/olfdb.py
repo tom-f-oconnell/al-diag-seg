@@ -5,8 +5,9 @@ file where it is on tensor, as al_analysis leaves it there. Per fly:
 
 * each diagnostic recording's ``trialmean_dff.tif`` (odor, Z, Y, X: mean dF/F of each odor)
   and ``trial_frames_and_odors.json``,
-* its ``RoiSet.zip`` (drawn on its recordings registered together, so on the same grid),
-  of which only glomeruli are trained on, as the database tells them apart (`roi_kind`),
+* its ``RoiSet.zip`` (drawn on its recordings registered together, so on the same grid):
+  Cellpose learns to outline every ROI of one glomerulus, named or not (`segment_keeper`), and
+  the rest (naming, the atlas, scores) only glomeruli, as the database tells them apart (`roi_kind`),
 * its average image, ``mocorr_concat_avg.tif`` (Z, Y, X): the mean of its motion-corrected movie,
 * the ``Experiment.xml`` of its recordings in its raw data (voxel sizes),
 * optionally its anatomical stacks (``anat/``), as ThorImage wrote them (``ChanA_*.tif``,
@@ -38,6 +39,8 @@ MANIFEST = "roi_training.json"
 _CHAN_A = re.compile(r"ChanA_(\d+)_(\d+)_(\d+)_(\d+)\.tiff?")
 # a mark of a glomerulus name not certain (DA1_t0), as the database (hong-data) tells them apart
 TENTATIVE = re.compile(r"_t\d+$")
+# an outline of the whole antennal lobe (per plane), not of a glomerulus
+AL_OUTLINE = re.compile(r"AL(?:_plane\d+)?", re.IGNORECASE)
 
 
 def manifest_path(path) -> Path:
@@ -104,6 +107,28 @@ def roi_keeper(glomeruli: set[str], tentative: bool = True):
     return keep
 
 
+def segment_keeper(glomeruli: set[str], tentative: bool = True):
+    """Which ROIs of a RoiSet Cellpose learns to outline (`roi_io.load_roiset`'s ``keep``):
+    every outline of one glomerulus, named or not: those `roi_keeper` keeps, numbered ROIs, names
+    ending in ``?`` (not certain), and names the database does not take (e.g. ``VP1_t1``). Not those
+    with a ``+`` (hong2p's maximal extent of a glomerulus, which may hold its neighbours' signal: a
+    glomerulus's own ROI is in it), outlines of the whole antennal lobe (``AL``, ``AL_plane3``), nor a
+    tentative ROI of a glomerulus also drawn without the mark (that one is it). Names only matter
+    to naming, which `roi_keeper`'s ROIs alone are used for; left out of training, the others
+    would be taught as background, though most are glomeruli."""
+    named = roi_keeper(glomeruli, tentative)
+
+    def keep(name: str, names: set[str]) -> bool:
+        if named(name, names):
+            return True
+        if "+" in name or AL_OUTLINE.fullmatch(name):
+            return False
+        bare = TENTATIVE.sub("", name)
+        return bare == name or bare not in names
+
+    return keep
+
+
 def finite(x: np.ndarray, what) -> np.ndarray:
     """``x`` with values that are not finite (NaN, inf) set to 0: al_analysis' dF/F has them at
     the odd voxel whose baseline is 0, and one breaks the PCA, correlation and refinement.
@@ -133,9 +158,10 @@ def read_stack(d: Path) -> np.ndarray:
     return movie.mean(0) if movie.ndim == 4 else movie
 
 
-def load(root: Path, entry: dict, name_table=None, keep=None) -> dict:
+def load(root: Path, entry: dict, name_table=None, keep=None, seg_keep=None) -> dict:
     """One fly of the export (see the module's docstring), with ``odors``: the name of each
-    of its response channels. ``keep``: which ROIs to train on (`roi_keeper`)."""
+    of its response channels. ``keep``: which ROIs to train on (`roi_keeper`); ``seg_keep``:
+    which Cellpose learns to outline (`segment_keeper`), as ``seg_labels``, if given."""
     root = Path(root)
     avg = finite(tifffile.imread(root / entry["average"]).astype(np.float32), entry["average"])
     resp, odors = [], []
@@ -150,6 +176,8 @@ def load(root: Path, entry: dict, name_table=None, keep=None) -> dict:
     xml = next(root / r["experiment_xml"] for r in entry["recordings"] if r.get("experiment_xml"))
     f = {"name": entry.get("name") or fly_name(entry), "average": avg, "responses": np.concatenate(resp), "odors": odors,
          "labels": labels, "lut": lut, "overlap": overlap, "spacing": metadata.thorimage_spacing(xml, avg.shape)}
+    if seg_keep is not None:
+        f["seg_labels"] = roi_io.load_roiset(root / entry["roiset"], avg.shape, keep=seg_keep)[0]
     if entry.get("stacks"):
         s = entry["stacks"][0]
         h = read_stack(root / s["dir"])
@@ -200,7 +228,7 @@ def load_export(path, tentative: bool = True, progress=None) -> dict:
                                          keep=keep)
     flies = []
     for i, e in enumerate(entries):
-        flies.append(load(root, e, name_table, keep))
+        flies.append(load(root, e, name_table, keep, segment_keeper(set(m["glomeruli"]), tentative=tentative)))
         if progress:
             progress("load", i + 1, len(entries))
     odors = align_odors(flies)

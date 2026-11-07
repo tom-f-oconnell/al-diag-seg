@@ -42,7 +42,10 @@ DETECT_IOU = 0.5
 class Options:
     """How a model is fit (`fit`). ``segmenter``: "cellpose", or "stand-in" (for tests, without a
     GPU or Cellpose's weights: trains nothing, and "predicts" a fly's own ROIs grown by 2
-    pixels, so only works on flies with ROIs)."""
+    pixels, so only works on flies with ROIs). ``final``: the ROIs a fly's are (`Model.final_kind`):
+    "pred", Cellpose's own, named (with the atlas, if there is one); or "refined", refined by odor
+    tuning and the atlas (on real flies, refinement shrank and broke up Cellpose's ROIs: see the
+    README)."""
     epochs: int = 200
     erode: int = 1
     xy_um: float | None = None
@@ -59,6 +62,7 @@ class Options:
     gpu: bool | None = None  # None: if PyTorch sees one
     segmenter: str = "cellpose"
     batch_size: int = 8  # Cellpose's training batches to start with, halved while one does not fit in the GPU
+    final: str = "pred"
 
 
 def use_gpu(gpu: bool | None) -> bool:
@@ -203,7 +207,14 @@ class Model:
         else:
             ids["pred"] = identity.assign_identities(resp, pred, self.template, sp, w_shape=0, w_layout=0)
         return {"labels": labels, "identities": ids, "atlas_maxprob": maxprob,
-                "final": "refined_prior" if self.atlas is not None else "refined_tuning"}
+                "final": self.final_kind()}
+
+    def final_kind(self) -> str:
+        """The kind of ROIs a fly's are (`Options.final`): 'pred' (Cellpose's), else the refined ones:
+        'refined_prior' with the atlas, 'refined_tuning' without."""
+        if self.options.final == "pred":
+            return "pred"
+        return "refined_prior" if self.atlas is not None else "refined_tuning"
 
     def evaluate(self, flies, out=None, progress=None) -> dict:
         """Predicts each fly (with ROIs) and scores each kind of predicted ROIs against its own.
@@ -215,7 +226,8 @@ class Model:
 
         Returns:
             dict with ``summary`` (a row per fly and kind of ROIs: recall, precision and
-            mean Dice of matched ROIs, splits, merges, crosstalk; and of its manual ROIs,
+            mean Dice of matched ROIs, as 3D objects and (``*_2d``) plane by plane
+            (`metrics.match_report_2d`), splits, merges, crosstalk; and of its manual ROIs,
             their crosstalk, to compare with), ``identity`` (per fly and
             kind: ROIs named as the manual one they overlap, of those that overlap one),
             ``glomeruli`` (per glomerulus, over the flies: how many have it, in how many
@@ -235,7 +247,8 @@ class Model:
                     write_volume(out / f"{f['name']}_atlas_maxprob.tif", p["atlas_maxprob"])
             ct = refine.crosstalk_report(f["responses"], f["labels"], f["spacing"])
             rows.append({"fly": f["name"], "rois": "manual", "n": len(np.unique(f["labels"])) - 1, "recall": "", "precision": "",
-                         "dice": "", "splits": "", "merges": "",
+                         "dice": "", "splits": "", "merges": "", "n_2d": int(sum(len(np.unique(z)) - 1 for z in f["labels"])),
+                         "recall_2d": "", "precision_2d": "", "dice_2d": "",
                          "coherence": np.mean(list(ct["coherence"].values())) if ct["coherence"] else "",
                          "neighbor_corr": np.mean(list(ct["neighbor_corr"].values())) if ct["neighbor_corr"] else "",
                          "leak": np.mean(np.abs(list(ct["leak"].values()))) if ct["leak"] else ""})
@@ -245,17 +258,18 @@ class Model:
                     write_volume(out / f"{f['name']}_{kind}.tif", lab.astype(np.uint16))
                     roi_io.write_roiset(lab, names, out / f"{f['name']}_{kind}_RoiSet.zip")
                 geo = metrics.match_report(f["labels"], lab)
+                g2 = metrics.match_report_2d(f["labels"], lab)
                 ct = refine.crosstalk_report(f["responses"], lab, f["spacing"])
                 rows.append({
                     "fly": f["name"], "rois": kind, "n": len(np.unique(lab)) - 1,
                     "recall": geo.get("recall", ""), "precision": geo.get("precision", ""),
                     "dice": geo.get("mean_dice_matched", ""), "splits": geo.get("splits", ""), "merges": geo.get("merges", ""),
+                    "n_2d": g2["n_pred"], "recall_2d": g2["recall"], "precision_2d": g2["precision"],
+                    "dice_2d": g2["mean_dice_matched"],
                     "coherence": np.mean(list(ct["coherence"].values())) if ct["coherence"] else "",
                     "neighbor_corr": np.mean(list(ct["neighbor_corr"].values())) if ct["neighbor_corr"] else "",
                     "leak": np.mean(np.abs(list(ct["leak"].values()))) if ct["leak"] else "",
                 })
-                if kind == "pred":
-                    continue
                 iou, g_ids, p_ids = metrics.iou_matrix(f["labels"], lab)
                 correct = total = 0
                 id_lines = []

@@ -3,8 +3,9 @@
 everything around the model without GPU or downloaded weights.
 
 syn/ is an export as from the odor response database (make_synthetic.py). Besides the
-pipeline's results, checks that the ROIs trained on are the glomeruli (no numbered ROI;
-G16_t0 as G16, but not where the fly has a plain G16 too), that the odor the fourth fly
+pipeline's results, checks that the ROIs named are the glomeruli (no numbered ROI;
+G16_t0 as G16, but not where the fly has a plain G16 too), that Cellpose trains on the
+numbered ROI too (but not on G16_t0 beside a G16), that the odor the fourth fly
 lacks is left out of every fly, and that the right ALs' anatomical stacks are mirrored.
 
 Runs three times, into syn_results/:
@@ -36,18 +37,20 @@ from alseg import atlas, olfdb, segment
 VAL = ["Ann_2026-01-01_7", "Ann_2026-01-01_8"]
 EXTRA = sys.argv[1:]
 DROP = ["G03", "G11"]
-_state = {"drop": (), "val_labels": [], "mirrored": {}, "odors": None, "rois": {}}
+_state = {"drop": (), "val_labels": [], "mirrored": {}, "odors": None, "rois": {}, "objects": {}}
 _orig_load, _orig_orient, _orig_align = olfdb.load, atlas.orient_hires, olfdb.align_odors
 
 
 def load(root, entry, *args, **kw):
     f = _orig_load(root, entry, *args, **kw)
     _state["rois"][f["name"]] = sorted(f["lut"].values())
+    _state["objects"][f["name"]] = len(np.unique(f["seg_labels"])) - 1  # (Cellpose's targets)
     if f["name"] in VAL:
         _state["val_labels"].append(f["labels"])
     else:
         for lab, name in list(f["lut"].items()):
             if name in _state["drop"]:
+                f["seg_labels"][f["labels"] == lab] = 0
                 f["labels"][f["labels"] == lab] = 0
                 del f["lut"][lab]
     return f
@@ -108,6 +111,8 @@ names = json.loads(Path("syn_results/base/name_table.json").read_text())
 assert sorted(names) == make_synthetic.NAMES, names
 assert "G16" in _state["rois"]["Ann_2026-01-01_2"] and _state["rois"]["Ann_2026-01-01_5"].count("G16") == 1
 assert sorted(_state["odors"]) == make_synthetic.ODORS[:-1], _state["odors"]
+# Cellpose's targets: every glomerulus and the numbered ROI
+assert all(_state["objects"][n] == len(r) + 1 for n, r in _state["rois"].items()), (_state["objects"], _state["rois"])
 wrong = {n: m for n, m in _state["mirrored"].items() if m != (int(n.rsplit("_", 1)[1]) in make_synthetic.RIGHT_ALS)}
 assert not wrong, f"anatomical stacks oriented wrongly: {wrong}"
 print(f"\nROIs, odors and the orientation of {len(_state['mirrored'])} anatomical stacks as expected")

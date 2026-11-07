@@ -46,16 +46,18 @@ is placed both ways, and kept the way that fits better.
 Flies are named <top folder of their data on tensor>_<date>_<fly number>, e.g.
 Tom_2023-11-19_1 (as --val takes them).
 
-Steps: ROIs -> labels; response channels; Cellpose fine-tune; then for each
-held-out fly: predict, refine by tuning alone, and (unless --no-atlas) refine
-with an atlas prior from a probabilistic atlas of the training flies, and
-name ROIs using tuning + position + shape + layout + atlas.
+Steps: ROIs -> labels; response channels; Cellpose fine-tune (on every ROI outlining one
+glomerulus, named or not); then for each held-out fly: predict, refine by tuning alone, and
+(unless --no-atlas) refine with an atlas prior from a probabilistic atlas of the training
+flies, and name ROIs using tuning + position + shape + layout + atlas. The ROIs to use are
+Cellpose's own, named (--final refined: the refined ones).
 
 Writes to --out: the model, model/ (everything a new fly is segmented and named with:
 run it on your own flies with alseg-predict); per held-out fly, each kind of ROIs
 (pred: Cellpose's; refined_tuning; refined_prior) as labels, <fly>_<kind>.tif, and as an
 ImageJ RoiSet named by glomerulus, <fly>_<kind>_RoiSet.zip; <fly>_atlas_maxprob.tif;
-<fly>_identities_<refinement>.csv; and summary.csv (one row per fly and kind of ROIs),
+<fly>_identities_<kind>.csv; and summary.csv (one row per fly and kind of ROIs: matched to
+the manual ROIs as 3D objects, and plane by plane, *_2d),
 glomeruli.csv (per glomerulus: in how many held-out flies it was found and named right),
 name_table.json, and Cellpose's own files under models/.
 """
@@ -150,6 +152,10 @@ def _parser() -> argparse.ArgumentParser:
                    help="finest voxel size of the atlas grid, which is one training fly's "
                         "registration image (its anatomical stack if it has one, the most finely "
                         "sampled in z) coarsened to this")
+    g.add_argument("--final", choices=["pred", "refined"], default="pred",
+                   help="the ROIs to use (written as <fly>_RoiSet.zip by alseg-predict, and scored as the "
+                        "final ones): Cellpose's own, named (pred); or refined by odor tuning and the atlas "
+                        "(refined: on real flies, this shrank and broke up Cellpose's ROIs)")
     g.add_argument("--w-prior", type=float, default=0.5, metavar="W",
                    help="weight of the atlas prior relative to odor tuning in refinement. Higher "
                         "lets the atlas overrule tuning more; on synthetic data >= 1 shrinks or "
@@ -228,15 +234,14 @@ def fit_main(argv=None):
         o = Options(epochs=a.epochs, batch_size=a.batch_size, erode=a.erode, xy_um=a.xy_um or (model_xy_um(a.model) if a.skip_train else None),
                     atlas=not a.no_atlas, reg=a.reg, hires_reg=a.hires_reg, atlas_um=a.atlas_um, w_prior=a.w_prior,
                     refs=[str(r) for r in a.ref], ref_side=a.ref_side, ref_reg=a.ref_reg, ref_weight=a.ref_weight,
-                    tentative=not a.no_tentative, gpu=False if a.cpu else None, segmenter=a.segmenter)
+                    tentative=not a.no_tentative, gpu=False if a.cpu else None, segmenter=a.segmenter, final=a.final)
         model = fit(flies, a.val, o, out=a.out, odors=data["odors"], aliases=data["aliases"], glomeruli=data["glomeruli"],
                     weights=a.model if a.skip_train else None)
         model.save(a.out / "model")
         print("saved model", a.out / "model")
     res = model.evaluate(val_f, a.out)
     for r in res["identity"]:
-        print(f"{r['fly']} identity ({'tuning + position' if r['rois'] == 'refined_tuning' else 'with atlas, shape, layout'}): "
-              f"{r['correct']}/{r['total']}")
+        print(f"{r['fly']} identity of {r['rois']}: {r['correct']}/{r['total']}")
     for r in res["summary"]:
         print({k: (round(v, 3) if isinstance(v, float) else v) for k, v in r.items()})
     return res
@@ -307,7 +312,7 @@ def predict_main(argv=None):
     else:
         flies = [load_fly(d, model, raw_dir=a.raw[i] if a.raw else None, spacing=a.spacing) for i, d in enumerate(a.fly)]
     a.out.mkdir(parents=True, exist_ok=True)
-    final = "refined_prior" if model.atlas is not None else "refined_tuning"
+    final = model.final_kind()
     scored = [f for f in flies if f.get("labels") is not None]
     if scored:  # (writes their ROIs too)
         model.evaluate(scored, a.out)

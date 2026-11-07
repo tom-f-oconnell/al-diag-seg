@@ -11,8 +11,8 @@ get an anatomical stack (3 um planes, 1.2 um pixels) with its own field of view,
 ThorImage writes it (ChanA_*.tif, two frames per plane), and as recorded: flies 3 and 7 are
 right ALs, whose functional data al_analysis mirrored left-right, so their stacks are
 mirrored relative to it. Each fly's 24 odors are split between two diagnostic recordings,
-in an order of its own; fly 4 has no odor24. Each RoiSet also has a numbered ROI (not to
-be trained on) and its G16 is tentative (G16_t0) in fly 2, and in fly 5 next to a G16 too. Every recording gets a minimal ThorImage Experiment.xml with its
+in an order of its own; fly 4 has no odor24. Each RoiSet also has a numbered ROI (not named:
+Cellpose alone trains on it) and its G16 is tentative (G16_t0) in fly 2, and in fly 5 next to a G16 too. Every recording gets a minimal ThorImage Experiment.xml with its
 voxel size, in the fly's raw data folder.
 
 Also writes <out>/reference/, a fixed reference atlas (labels.tif + glomeruli.csv,

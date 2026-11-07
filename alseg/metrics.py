@@ -18,6 +18,25 @@ def iou_matrix(gt: np.ndarray, pred: np.ndarray):
     return inter / (area_g + area_p - inter + 1e-8), g_ids, p_ids
 
 
+def match_report_2d(gt: np.ndarray, pred: np.ndarray, thresh: float = 0.5) -> dict:
+    """`match_report`'s recall, precision and mean Dice of matched ROIs, plane by plane: each
+    label's outline on a plane is an ROI, as ROIs are drawn and used (and as Cellpose predicts
+    them, before its planes' masks are stitched into 3D objects). Not penalized, unlike the 3D
+    match, by an object spanning other planes than the manual one, planes being far apart."""
+    tp = n_gt = n_pred = 0
+    dice = []
+    for z in range(gt.shape[0]):
+        iou, g_ids, p_ids = iou_matrix(gt[z], pred[z])
+        n_gt, n_pred = n_gt + len(g_ids), n_pred + len(p_ids)
+        if iou.size:
+            r, c = linear_sum_assignment(-iou)
+            v = iou[r, c][iou[r, c] >= thresh]
+            tp += len(v)
+            dice += list(2 * v / (1 + v))
+    return {"n_gt": n_gt, "n_pred": n_pred, "tp": tp, "precision": tp / max(n_pred, 1), "recall": tp / max(n_gt, 1),
+            "mean_dice_matched": float(np.mean(dice)) if dice else 0.0}
+
+
 def match_report(gt: np.ndarray, pred: np.ndarray, thresh: float = 0.5) -> dict:
     """Matched IoU/Dice per manual ROI, plus counts of misses, false
     positives, splits (one manual ROI covered by >1 prediction) and merges."""

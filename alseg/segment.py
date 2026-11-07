@@ -73,7 +73,9 @@ def make_training_slices(
     min_objects: int = 1,
     xy_um: float | None = None,
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
-    """flies: [{"channels": (C, Z, Y, X), "labels": (Z, Y, X), "spacing": (z, y, x)}, ...]
+    """flies: [{"channels": (C, Z, Y, X), "labels": (Z, Y, X), "spacing": (z, y, x)}, ...],
+    each with ``seg_labels`` (every ROI of one glomerulus, named or not: `olfdb.segment_keeper`)
+    to train on instead of ``labels``, if it has them.
 
     Returns lists of (Y, X, C) images and (Y, X) relabeled instance masks, resampled
     in-plane to ``xy_um`` pixels if given (``erode`` is in those pixels). Slices with
@@ -82,7 +84,8 @@ def make_training_slices(
     imgs, masks = [], []
     for f in flies:
         shape = xy_shape(f["labels"].shape[1:], f.get("spacing", (1, 1, 1)), xy_um)
-        ch, lab = resize_xy(f["channels"], shape, 1), resize_xy(f["labels"], shape, 0)
+        ch = resize_xy(f["channels"], shape, 1)
+        lab = resize_xy(f["seg_labels"] if f.get("seg_labels") is not None else f["labels"], shape, 0)
         for z in range(lab.shape[0]):
             m = lab[z]
             if len(np.unique(m)) - 1 < min_objects:
