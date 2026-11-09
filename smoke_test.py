@@ -20,6 +20,9 @@ it with alseg-predict on a held-out fly twice: as a fly of the export, and from 
 folders as al_analysis leaves them. Both have to give the same RoiSet.zip, of the
 database's glomerulus names (and numbered ROIs).
 
+Last, checks that the options of how Cellpose's masks are made reach it, are saved with a model, and
+that alseg-predict's replace the model's.
+
 Options after smoke_test.py are passed on to every run, e.g. --deterministic.
 """
 import csv
@@ -33,10 +36,12 @@ from skimage.segmentation import expand_labels
 import make_synthetic
 import run_pipeline
 from alseg import atlas, olfdb, segment
+from alseg.model import Model, Options
 
 VAL = ["Ann_2026-01-01_7", "Ann_2026-01-01_8"]
 EXTRA = sys.argv[1:]
 DROP = ["G03", "G11"]
+MASK_OPTIONS = ("cellprob_threshold", "flow_threshold", "dilate")
 _state = {"drop": (), "val_labels": [], "mirrored": {}, "odors": None, "rois": {}, "objects": {}}
 _orig_load, _orig_orient, _orig_align = olfdb.load, atlas.orient_hires, olfdb.align_odors
 
@@ -75,6 +80,7 @@ def fake_train(train_f, val_f, out, **kw):
 
 
 def fake_predict(model, channels, **kw):
+    _state["predict_kw"] = kw
     lab = _state["val_labels"].pop(0)  # predictions are requested in VAL order
     return np.stack([expand_labels(s, 2) for s in lab])
 
@@ -115,7 +121,10 @@ assert sorted(_state["odors"]) == make_synthetic.ODORS[:-1], _state["odors"]
 assert all(_state["objects"][n] == len(r) + 1 for n, r in _state["rois"].items()), (_state["objects"], _state["rois"])
 wrong = {n: m for n, m in _state["mirrored"].items() if m != (int(n.rsplit("_", 1)[1]) in make_synthetic.RIGHT_ALS)}
 assert not wrong, f"anatomical stacks oriented wrongly: {wrong}"
-print(f"\nROIs, odors and the orientation of {len(_state['mirrored'])} anatomical stacks as expected")
+o, kw = Options(), _state["predict_kw"]
+assert [kw[k] for k in MASK_OPTIONS] == [getattr(o, k) for k in MASK_OPTIONS], kw
+print(f"\nROIs, odors and the orientation of {len(_state['mirrored'])} anatomical stacks as expected; Cellpose's "
+      f"masks made as Options says")
 print(f"{' '.join(DROP)} named correctly in held-out flies:")
 for out in ("syn_results/dropped", "syn_results/dropped_ref"):
     print(f"  {out}: {dropped_named(out)}")
@@ -138,3 +147,20 @@ names = {r.name for r in roifile.ImagejRoi.fromfile(a)}
 assert names <= set(make_synthetic.NAMES) | {n for n in names if n.isdigit()} and names & set(make_synthetic.NAMES), names
 print(f"model saved, loaded and run on {VAL[1]} as a fly of the export and from its own folders: the same "
       f"RoiSet.zip ({len(names)} names)")
+
+# the mask options, saved with a model, and overridden by alseg-predict's
+saved = json.loads(Path("syn_results/stand_in/model/model.json").read_text())["options"]
+assert [saved[k] for k in MASK_OPTIONS] == [getattr(Options(), k) for k in MASK_OPTIONS], saved
+seen, _orig_predict = {}, Model.predict
+
+
+def spy(self, fly):
+    seen.update({k: getattr(self.options, k) for k in MASK_OPTIONS})
+    return _orig_predict(self, fly)
+
+
+Model.predict = spy
+cli.predict_main(["syn_results/stand_in/model", "--export", "syn", "--flies", VAL[1], "--out", "syn_results/predict_override",
+                  "--cellprob-threshold", "-1.5", "--dilate", "3"])
+assert seen == {"cellprob_threshold": -1.5, "flow_threshold": Options().flow_threshold, "dilate": 3}, seen
+print("mask options saved with the model, and alseg-predict's used instead where given")

@@ -63,6 +63,11 @@ class Options:
     segmenter: str = "cellpose"
     batch_size: int = 8  # Cellpose's training batches to start with, halved while one does not fit in the GPU
     final: str = "pred"
+    # how Cellpose's masks are made (`segment.predict`), also for models saved before these were
+    # options (they then take these defaults): picked on the database's flies (see the README)
+    cellprob_threshold: float = -1.0
+    flow_threshold: float = 0.4
+    dilate: int = 1  # (grown back by `erode`)
 
 
 def use_gpu(gpu: bool | None) -> bool:
@@ -187,7 +192,9 @@ class Model:
             pred = _stand_in(fly)
         else:
             channels = responses.build_channels(fly["average"], resp, self.pca)
-            pred = segment.predict(self.segmenter, channels, gpu=use_gpu(o.gpu), spacing=sp, xy_um=self.xy_um)
+            pred = segment.predict(self.segmenter, channels, gpu=use_gpu(o.gpu), spacing=sp, xy_um=self.xy_um,
+                                   cellprob_threshold=o.cellprob_threshold, flow_threshold=o.flow_threshold,
+                                   dilate=o.dilate)
         labels = {"pred": pred, "refined_tuning": refine.refine_by_tuning(resp, pred, sp)}
         ids = {"refined_tuning": identity.assign_identities(resp, labels["refined_tuning"], self.template, sp,
                                                             w_shape=0, w_layout=0)}

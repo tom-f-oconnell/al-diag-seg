@@ -231,14 +231,18 @@ def predict(
     dilate: int = 0,
     spacing=(1.0, 1.0, 1.0),
     xy_um: float | None = None,
+    cellprob_threshold: float = 0.0,
+    flow_threshold: float = 0.4,
 ) -> np.ndarray:
     """Segment a fly. channels: (C, Z, Y, X). Returns (Z, Y, X) labels.
 
     Pass the ``xy_um`` the model was trained at, and the fly's voxel size
     (``spacing``), to segment at that pixel size; labels come back on the fly's grid.
     If the model was trained on eroded targets, predictions are cores; pass
-    ``dilate`` to grow them back, or better, keep them as cores and let
+    ``dilate`` to grow them back (pixels, on the fly's grid), or keep them as cores and let
     :mod:`alseg.refine` decide which border voxels are clean.
+    ``cellprob_threshold``, ``flow_threshold``: Cellpose's (lower cell probability threshold:
+    pixels less surely in an ROI kept; flow threshold 0: masks kept however badly their flows fit).
     """
     from cellpose import models
 
@@ -254,6 +258,8 @@ def predict(
         stitch_threshold=stitch_threshold,
         diameter=diameter,
         normalize=False,
+        cellprob_threshold=cellprob_threshold,
+        flow_threshold=flow_threshold,
     )
     masks = resize_xy(np.asarray(masks), native, 0)
     if dilate:

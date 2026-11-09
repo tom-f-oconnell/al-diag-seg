@@ -97,6 +97,22 @@ class _HelpFormatter(argparse.RawDescriptionHelpFormatter, argparse.ArgumentDefa
         return super()._get_help_string(action)
 
 
+def _mask_args(g, fit: bool) -> None:
+    """How Cellpose's masks are made: options of a model fit (saved with it), or of a prediction
+    (default: the model's)."""
+    o = Options()
+    model = "" if fit else ". Default: the model's (models saved without it: %s)"
+    g.add_argument("--cellprob-threshold", type=float, default=o.cellprob_threshold if fit else None, metavar="T",
+                   help="Cellpose's cell probability threshold: lower keeps pixels it is less sure are in an ROI, "
+                        "so finds more of them and makes them bigger" + (model % o.cellprob_threshold if model else ""))
+    g.add_argument("--flow-threshold", type=float, default=o.flow_threshold if fit else None, metavar="T",
+                   help="Cellpose's flow error threshold: masks whose flows fit worse are dropped; higher "
+                        "keeps more, 0 keeps all" + (model % o.flow_threshold if model else ""))
+    g.add_argument("--dilate", type=int, default=o.dilate if fit else None, metavar="PX",
+                   help="pixels (on the fly's grid) to grow Cellpose's masks by in-plane, as its training "
+                        "ROIs were eroded (--erode)" + (model % o.dilate if model else ""))
+
+
 def _parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=FIT_DOC, epilog=EXAMPLES, formatter_class=_HelpFormatter)
     ap.add_argument("data", type=Path,
@@ -126,6 +142,7 @@ def _parser() -> argparse.ArgumentParser:
     g.add_argument("--erode", type=int, default=1, metavar="PX",
                    help="pixels (at --xy-um) to erode the training ROIs by in-plane, so the model "
                         "learns ROI cores with gaps between neighboring glomeruli")
+    _mask_args(g, fit=True)
     g.add_argument("--skip-train", action="store_true", help="don't train; predict with --model")
     g.add_argument("--model", type=Path, metavar="PATH",
                    help="for --skip-train: a model folder (<out>/model of an earlier run: nothing is "
@@ -234,7 +251,8 @@ def fit_main(argv=None):
         o = Options(epochs=a.epochs, batch_size=a.batch_size, erode=a.erode, xy_um=a.xy_um or (model_xy_um(a.model) if a.skip_train else None),
                     atlas=not a.no_atlas, reg=a.reg, hires_reg=a.hires_reg, atlas_um=a.atlas_um, w_prior=a.w_prior,
                     refs=[str(r) for r in a.ref], ref_side=a.ref_side, ref_reg=a.ref_reg, ref_weight=a.ref_weight,
-                    tentative=not a.no_tentative, gpu=False if a.cpu else None, segmenter=a.segmenter, final=a.final)
+                    tentative=not a.no_tentative, gpu=False if a.cpu else None, segmenter=a.segmenter, final=a.final,
+                    cellprob_threshold=a.cellprob_threshold, flow_threshold=a.flow_threshold, dilate=a.dilate)
         model = fit(flies, a.val, o, out=a.out, odors=data["odors"], aliases=data["aliases"], glomeruli=data["glomeruli"],
                     weights=a.model if a.skip_train else None)
         model.save(a.out / "model")
@@ -290,6 +308,7 @@ def predict_main(argv=None):
     ap.add_argument("--flies", nargs="+", default=[], metavar="NAME", help="which flies of --export (default: all)")
     ap.add_argument("--out", type=Path, default=Path("predictions"), metavar="DIR", help="output folder, created if needed")
     ap.add_argument("--cpu", action="store_true", help="run Cellpose on the CPU (slower) even if there is a GPU")
+    _mask_args(ap, fit=False)
     a = ap.parse_args(argv)
     if not (a.model / "model.json").is_file():
         ap.error(f"{a.model} is not a model's folder (no model.json)")
@@ -300,6 +319,9 @@ def predict_main(argv=None):
     model = Model.load(a.model)
     if a.cpu:
         model.options.gpu = False
+    for k in ("cellprob_threshold", "flow_threshold", "dilate"):
+        if getattr(a, k) is not None:
+            setattr(model.options, k, getattr(a, k))
     if a.export:
         data = olfdb.load_export(a.export, tentative=model.options.tentative)
         flies = [f for f in data["flies"] if not a.flies or f["name"] in a.flies]
