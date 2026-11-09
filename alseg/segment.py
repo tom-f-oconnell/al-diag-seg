@@ -235,8 +235,8 @@ def predict(
     cellprob_threshold: float = 0.0,
     flow_threshold: float = 0.4,
     responses: np.ndarray | None = None,
-    join_overlap: float = 0.3,
-    join_corr: float = 0.5,
+    join_overlap: float = 0.2,
+    join_corr: float = 0.7,
 ) -> np.ndarray:
     """Segment a fly. channels: (C, Z, Y, X). Returns (Z, Y, X) labels.
 
@@ -275,7 +275,7 @@ def predict(
     return masks
 
 
-def join_planes(masks: np.ndarray, responses: np.ndarray, min_overlap: float = 0.3, min_corr: float = 0.5) -> np.ndarray:
+def join_planes(masks: np.ndarray, responses: np.ndarray, min_overlap: float = 0.2, min_corr: float = 0.7) -> np.ndarray:
     """Joins each plane's masks ((Z, Y, X), labels of each plane's own) into 3D objects.
 
     Masks of adjacent planes are matched one to one, for the most overlap in all (the Hungarian
@@ -284,8 +284,8 @@ def join_planes(masks: np.ndarray, responses: np.ndarray, min_overlap: float = 0
     Overlap of the smaller one, not IoU, as a glomerulus' outline changes size from plane to
     plane; tuning, as neighbouring glomeruli overlapping between planes are tuned differently.
     On the database's flies, Cellpose's own stitching (by IoU >= 0.25, many to one) joined
-    93% of adjacent outlines of one glomerulus and 14% of overlapping ones of two; this, 90% and
-    9% (see the README).
+    93% of overlapping masks of one glomerulus in adjacent planes and 14% of two's; of those, 91%
+    and 10% pass the defaults here, before they are matched one to one (see the README).
     """
     from scipy.optimize import linear_sum_assignment
 

@@ -64,15 +64,16 @@ class Options:
     batch_size: int = 8  # Cellpose's training batches to start with, halved while one does not fit in the GPU
     final: str = "pred"
     # how Cellpose's masks are made (`segment.predict`), also for models saved before these were
-    # options (they then take these defaults): picked on the database's flies (see the README)
-    cellprob_threshold: float = -1.0
-    flow_threshold: float = 0.4
-    dilate: int = 1  # (grown back by `erode`)
+    # options (they then take these defaults): picked on the database's flies, scored as partly
+    # drawn (see the README)
+    cellprob_threshold: float = -2.0
+    flow_threshold: float = 0.8
+    dilate: int = 0
     # how the planes' masks are joined into 3D objects: "tuning" (`segment.join_planes`, with
     # join_overlap and join_corr) or "cellpose" (Cellpose's stitching, by IoU >= 0.25)
     join: str = "tuning"
-    join_overlap: float = 0.3
-    join_corr: float = 0.5
+    join_overlap: float = 0.2
+    join_corr: float = 0.7
 
 
 def use_gpu(gpu: bool | None) -> bool:
