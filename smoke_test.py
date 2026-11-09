@@ -20,8 +20,9 @@ it with alseg-predict on a held-out fly twice: as a fly of the export, and from 
 folders as al_analysis leaves them. Both have to give the same RoiSet.zip, of the
 database's glomerulus names (and numbered ROIs).
 
-Last, checks that the options of how Cellpose's masks are made reach it, are saved with a model, and
-that alseg-predict's replace the model's.
+Last, checks that the options of how Cellpose's masks are made and joined into 3D objects reach it,
+are saved with a model, and that alseg-predict's replace the model's; and the joining of masks of
+adjacent planes by overlap and tuning (`segment.join_planes`).
 
 Options after smoke_test.py are passed on to every run, e.g. --deterministic.
 """
@@ -41,7 +42,7 @@ from alseg.model import Model, Options
 VAL = ["Ann_2026-01-01_7", "Ann_2026-01-01_8"]
 EXTRA = sys.argv[1:]
 DROP = ["G03", "G11"]
-MASK_OPTIONS = ("cellprob_threshold", "flow_threshold", "dilate")
+MASK_OPTIONS = ("cellprob_threshold", "flow_threshold", "dilate", "join", "join_overlap", "join_corr")
 _state = {"drop": (), "val_labels": [], "mirrored": {}, "odors": None, "rois": {}, "objects": {}}
 _orig_load, _orig_orient, _orig_align = olfdb.load, atlas.orient_hires, olfdb.align_odors
 
@@ -122,7 +123,8 @@ assert all(_state["objects"][n] == len(r) + 1 for n, r in _state["rois"].items()
 wrong = {n: m for n, m in _state["mirrored"].items() if m != (int(n.rsplit("_", 1)[1]) in make_synthetic.RIGHT_ALS)}
 assert not wrong, f"anatomical stacks oriented wrongly: {wrong}"
 o, kw = Options(), _state["predict_kw"]
-assert [kw[k] for k in MASK_OPTIONS] == [getattr(o, k) for k in MASK_OPTIONS], kw
+passed = ("cellprob_threshold", "flow_threshold", "dilate", "join_overlap", "join_corr")
+assert [kw[k] for k in passed] == [getattr(o, k) for k in passed] and kw["responses"] is not None, kw
 print(f"\nROIs, odors and the orientation of {len(_state['mirrored'])} anatomical stacks as expected; Cellpose's "
       f"masks made as Options says")
 print(f"{' '.join(DROP)} named correctly in held-out flies:")
@@ -162,5 +164,17 @@ def spy(self, fly):
 Model.predict = spy
 cli.predict_main(["syn_results/stand_in/model", "--export", "syn", "--flies", VAL[1], "--out", "syn_results/predict_override",
                   "--cellprob-threshold", "-1.5", "--dilate", "3"])
-assert seen == {"cellprob_threshold": -1.5, "flow_threshold": Options().flow_threshold, "dilate": 3}, seen
+assert seen == {**{k: getattr(Options(), k) for k in MASK_OPTIONS}, "cellprob_threshold": -1.5, "dilate": 3}, seen
 print("mask options saved with the model, and alseg-predict's used instead where given")
+
+# masks of adjacent planes joined one to one, by overlap and tuning: the second plane's mask overlaps
+# A more than B, but is tuned like B (Cellpose's stitching, by IoU, would join it to A)
+masks = np.zeros((2, 16, 20), int)
+masks[0, :10, :10], masks[0, :10, 10:], masks[1, :10, 3:13], masks[1, 12:, :4] = 1, 2, 5, 6
+resp = np.zeros((4, 2, 16, 20))
+resp[0][masks == 1], resp[1][masks == 2], resp[1][masks == 5], resp[2][masks == 6] = 1, 1, 1, 1
+j = segment.join_planes(masks, resp)
+assert j[1, 0, 5] == j[0, 0, 15] != j[0, 0, 0] and len(np.unique(j)) == 4, np.unique(j)
+k = segment.join_planes(masks, resp, min_corr=-1)
+assert k[1, 0, 5] == k[0, 0, 0], "joined by overlap alone, it should be A's"
+print("masks of adjacent planes joined by overlap and tuning")

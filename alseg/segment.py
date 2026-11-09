@@ -2,7 +2,8 @@
 
 The ROIs were drawn per z-slice, so we train 2D: every z-slice of every
 training fly is one training image. At prediction time, slices are
-segmented independently and stitched into 3D objects by overlap.
+segmented independently and joined into 3D objects by overlap and odor tuning
+(`join_planes`).
 
 Flies can have different in-plane pixel sizes, so with ``xy_um`` every slice is
 resampled in-plane to that pixel size for the model, and predictions are resampled
@@ -233,6 +234,9 @@ def predict(
     xy_um: float | None = None,
     cellprob_threshold: float = 0.0,
     flow_threshold: float = 0.4,
+    responses: np.ndarray | None = None,
+    join_overlap: float = 0.3,
+    join_corr: float = 0.5,
 ) -> np.ndarray:
     """Segment a fly. channels: (C, Z, Y, X). Returns (Z, Y, X) labels.
 
@@ -243,27 +247,77 @@ def predict(
     :mod:`alseg.refine` decide which border voxels are clean.
     ``cellprob_threshold``, ``flow_threshold``: Cellpose's (lower cell probability threshold:
     pixels less surely in an ROI kept; flow threshold 0: masks kept however badly their flows fit).
+    The planes' masks are joined into 3D objects by `join_planes` if ``responses`` (the fly's,
+    (n_odors, Z, Y, X)) are given, with ``join_overlap`` and ``join_corr``; otherwise by
+    Cellpose (each mask to its best match by IoU in the plane before, if >= ``stitch_threshold``).
     """
-    from cellpose import models
+    from cellpose import models, utils
 
     model = models.CellposeModel(gpu=gpu, pretrained_model=str(model_path))
     native = channels.shape[2:]
     channels = resize_xy(channels, xy_shape(native, spacing, xy_um), 1)
     stack = np.moveaxis(channels, 0, -1)  # (Z, Y, X, C)
-    masks, _, _ = model.eval(
-        stack,
-        channel_axis=-1,
-        z_axis=0,
-        do_3D=False,
-        stitch_threshold=stitch_threshold,
-        diameter=diameter,
-        normalize=False,
-        cellprob_threshold=cellprob_threshold,
-        flow_threshold=flow_threshold,
-    )
-    masks = resize_xy(np.asarray(masks), native, 0)
+    kw = dict(channel_axis=-1, do_3D=False, diameter=diameter, normalize=False, cellprob_threshold=cellprob_threshold,
+              flow_threshold=flow_threshold)
+    if responses is None:
+        masks, _, _ = model.eval(stack, z_axis=0, stitch_threshold=stitch_threshold, **kw)
+        masks = resize_xy(np.asarray(masks).reshape(stack.shape[:3]), native, 0)
+    else:
+        # each plane on its own (no minimum size yet, as when Cellpose stitches: it is of the objects)
+        masks, _, _ = model.eval(stack, z_axis=None, stitch_threshold=0.0, min_size=-1, **kw)
+        masks = resize_xy(np.asarray(masks).reshape(stack.shape[:3]).astype(np.int32), native, 0)
+        masks = join_planes(masks, responses, join_overlap, join_corr)
+        masks = utils.fill_holes_and_remove_small_masks(masks, min_size=15)
     if dilate:
         from skimage.segmentation import expand_labels
 
         masks = np.stack([expand_labels(m, dilate) for m in masks])
     return masks
+
+
+def join_planes(masks: np.ndarray, responses: np.ndarray, min_overlap: float = 0.3, min_corr: float = 0.5) -> np.ndarray:
+    """Joins each plane's masks ((Z, Y, X), labels of each plane's own) into 3D objects.
+
+    Masks of adjacent planes are matched one to one, for the most overlap in all (the Hungarian
+    algorithm), where they overlap by at least ``min_overlap`` of the smaller one's area and
+    their mean odor tunings (``responses``: (n_odors, Z, Y, X)) correlate at least ``min_corr``.
+    Overlap of the smaller one, not IoU, as a glomerulus' outline changes size from plane to
+    plane; tuning, as neighbouring glomeruli overlapping between planes are tuned differently.
+    On the database's flies, Cellpose's own stitching (by IoU >= 0.25, many to one) joined
+    93% of adjacent outlines of one glomerulus and 14% of overlapping ones of two; this, 90% and
+    9% (see the README).
+    """
+    from scipy.optimize import linear_sum_assignment
+
+    masks = np.asarray(masks)
+    ids, n = [], 0  # each plane's masks numbered across planes
+    u = np.zeros(masks.shape, np.int64)
+    for z, m in enumerate(masks):
+        own = np.unique(m)[1:]
+        lut = np.zeros(int(m.max()) + 1, np.int64)
+        lut[own] = np.arange(n + 1, n + 1 + len(own))
+        u[z], n = lut[m], n + len(own)
+        ids.append(lut[own])
+    flat = u.ravel()
+    count = np.bincount(flat, minlength=n + 1)
+    tune = np.stack([np.bincount(flat, weights=r.ravel(), minlength=n + 1) for r in responses], 1)
+    tune = tune / np.maximum(count, 1)[:, None]
+    tune -= tune.mean(1, keepdims=True)
+    tune /= np.linalg.norm(tune, axis=1, keepdims=True) + 1e-8
+    parent = np.arange(n + 1)
+    for z in range(len(u) - 1):
+        a, b = ids[z], ids[z + 1]
+        if not len(a) or not len(b):
+            continue
+        la = np.where(u[z] > 0, u[z] - a[0] + 1, 0)  # (each plane's numbers are consecutive)
+        lb = np.where(u[z + 1] > 0, u[z + 1] - b[0] + 1, 0)
+        both = np.bincount((la * (len(b) + 1) + lb).ravel(), minlength=(len(a) + 1) * (len(b) + 1))
+        both = both.reshape(len(a) + 1, len(b) + 1)[1:, 1:]
+        frac = both / np.minimum(count[a][:, None], count[b][None, :])
+        ok = (frac >= min_overlap) & (tune[a] @ tune[b].T >= min_corr)
+        r, c = linear_sum_assignment(np.where(ok, -frac, 1.0))
+        for i, j in zip(r, c):
+            if ok[i, j]:
+                parent[b[j]] = parent[a[i]]  # (a's are numbered before b's, and already point to their object)
+    _, out = np.unique(parent, return_inverse=True)  # (0, background, stays 0)
+    return out[u].astype(np.int32)

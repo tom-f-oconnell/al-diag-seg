@@ -97,9 +97,12 @@ class _HelpFormatter(argparse.RawDescriptionHelpFormatter, argparse.ArgumentDefa
         return super()._get_help_string(action)
 
 
+MASK_OPTIONS = ("cellprob_threshold", "flow_threshold", "dilate", "join", "join_overlap", "join_corr")
+
+
 def _mask_args(g, fit: bool) -> None:
-    """How Cellpose's masks are made: options of a model fit (saved with it), or of a prediction
-    (default: the model's)."""
+    """How Cellpose's masks are made and joined into 3D objects (`MASK_OPTIONS`): options of a
+    model fit (saved with it), or of a prediction (default: the model's)."""
     o = Options()
     model = "" if fit else ". Default: the model's (models saved without it: %s)"
     g.add_argument("--cellprob-threshold", type=float, default=o.cellprob_threshold if fit else None, metavar="T",
@@ -111,6 +114,17 @@ def _mask_args(g, fit: bool) -> None:
     g.add_argument("--dilate", type=int, default=o.dilate if fit else None, metavar="PX",
                    help="pixels (on the fly's grid) to grow Cellpose's masks by in-plane, as its training "
                         "ROIs were eroded (--erode)" + (model % o.dilate if model else ""))
+    g.add_argument("--join", choices=["tuning", "cellpose"], default=o.join if fit else None,
+                   help="how the planes' masks are joined into 3D objects: masks of adjacent planes matched one "
+                        "to one where they overlap (--join-overlap) and are tuned alike (--join-corr); or "
+                        "Cellpose's stitching (each to its best match by IoU in the plane before, if >= 0.25)"
+                   + (model % o.join if model else ""))
+    g.add_argument("--join-overlap", type=float, default=o.join_overlap if fit else None, metavar="F",
+                   help="for --join tuning: least overlap of masks in adjacent planes, as a fraction of the "
+                        "smaller one" + (model % o.join_overlap if model else ""))
+    g.add_argument("--join-corr", type=float, default=o.join_corr if fit else None, metavar="R",
+                   help="for --join tuning: least correlation of their mean odor tunings (-1: any)"
+                   + (model % o.join_corr if model else ""))
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -252,7 +266,7 @@ def fit_main(argv=None):
                     atlas=not a.no_atlas, reg=a.reg, hires_reg=a.hires_reg, atlas_um=a.atlas_um, w_prior=a.w_prior,
                     refs=[str(r) for r in a.ref], ref_side=a.ref_side, ref_reg=a.ref_reg, ref_weight=a.ref_weight,
                     tentative=not a.no_tentative, gpu=False if a.cpu else None, segmenter=a.segmenter, final=a.final,
-                    cellprob_threshold=a.cellprob_threshold, flow_threshold=a.flow_threshold, dilate=a.dilate)
+                    **{k: getattr(a, k) for k in MASK_OPTIONS})
         model = fit(flies, a.val, o, out=a.out, odors=data["odors"], aliases=data["aliases"], glomeruli=data["glomeruli"],
                     weights=a.model if a.skip_train else None)
         model.save(a.out / "model")
@@ -319,7 +333,7 @@ def predict_main(argv=None):
     model = Model.load(a.model)
     if a.cpu:
         model.options.gpu = False
-    for k in ("cellprob_threshold", "flow_threshold", "dilate"):
+    for k in MASK_OPTIONS:
         if getattr(a, k) is not None:
             setattr(model.options, k, getattr(a, k))
     if a.export:

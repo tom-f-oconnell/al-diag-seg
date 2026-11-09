@@ -68,6 +68,11 @@ class Options:
     cellprob_threshold: float = -1.0
     flow_threshold: float = 0.4
     dilate: int = 1  # (grown back by `erode`)
+    # how the planes' masks are joined into 3D objects: "tuning" (`segment.join_planes`, with
+    # join_overlap and join_corr) or "cellpose" (Cellpose's stitching, by IoU >= 0.25)
+    join: str = "tuning"
+    join_overlap: float = 0.3
+    join_corr: float = 0.5
 
 
 def use_gpu(gpu: bool | None) -> bool:
@@ -194,7 +199,8 @@ class Model:
             channels = responses.build_channels(fly["average"], resp, self.pca)
             pred = segment.predict(self.segmenter, channels, gpu=use_gpu(o.gpu), spacing=sp, xy_um=self.xy_um,
                                    cellprob_threshold=o.cellprob_threshold, flow_threshold=o.flow_threshold,
-                                   dilate=o.dilate)
+                                   dilate=o.dilate, responses=resp if o.join == "tuning" else None,
+                                   join_overlap=o.join_overlap, join_corr=o.join_corr)
         labels = {"pred": pred, "refined_tuning": refine.refine_by_tuning(resp, pred, sp)}
         ids = {"refined_tuning": identity.assign_identities(resp, labels["refined_tuning"], self.template, sp,
                                                             w_shape=0, w_layout=0)}
