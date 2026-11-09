@@ -229,7 +229,7 @@ class Model:
             return "pred"
         return "refined_prior" if self.atlas is not None else "refined_tuning"
 
-    def evaluate(self, flies, out=None, progress=None) -> dict:
+    def evaluate(self, flies, out=None, progress=None, partly_drawn: bool = True) -> dict:
         """Predicts each fly (with ROIs) and scores each kind of predicted ROIs against its own.
 
         Writes to ``out`` (if given), per fly: each kind's labels (``<fly>_<kind>.tif``) and
@@ -244,7 +244,13 @@ class Model:
             their crosstalk, to compare with), ``identity`` (per fly and
             kind: ROIs named as the manual one they overlap, of those that overlap one),
             ``glomeruli`` (per glomerulus, over the flies: how many have it, in how many
-            the final ROIs detect it, mean Dice, named right) and ``final``.
+            the final ROIs detect it, mean Dice, named right), ``final`` and ``scoring``.
+
+        ``partly_drawn`` (``scoring``: "partly drawn", else "strict"): as glomeruli are often
+        drawn on some of their planes only (their clearest), a predicted ROI's voxels on planes
+        where the manual one has no outline count against it only where they lie in another manual
+        ROI (`metrics.iou_matrix_partly_drawn`), here and in naming, and precision is of the
+        predicted ROIs matched or lying mostly in manual ROIs (``n_scored``, ``n_scored_2d``).
         """
         out = Path(out) if out is not None else None
         if out:
@@ -260,7 +266,8 @@ class Model:
                     write_volume(out / f"{f['name']}_atlas_maxprob.tif", p["atlas_maxprob"])
             ct = refine.crosstalk_report(f["responses"], f["labels"], f["spacing"])
             rows.append({"fly": f["name"], "rois": "manual", "n": len(np.unique(f["labels"])) - 1, "recall": "", "precision": "",
-                         "dice": "", "splits": "", "merges": "", "n_2d": int(sum(len(np.unique(z)) - 1 for z in f["labels"])),
+                         "dice": "", "splits": "", "merges": "", "n_scored": "",
+                         "n_2d": int(sum(len(np.unique(z)) - 1 for z in f["labels"])), "n_scored_2d": "",
                          "recall_2d": "", "precision_2d": "", "dice_2d": "",
                          "coherence": np.mean(list(ct["coherence"].values())) if ct["coherence"] else "",
                          "neighbor_corr": np.mean(list(ct["neighbor_corr"].values())) if ct["neighbor_corr"] else "",
@@ -270,20 +277,24 @@ class Model:
                 if out:
                     write_volume(out / f"{f['name']}_{kind}.tif", lab.astype(np.uint16))
                     roi_io.write_roiset(lab, names, out / f"{f['name']}_{kind}_RoiSet.zip")
-                geo = metrics.match_report(f["labels"], lab)
-                g2 = metrics.match_report_2d(f["labels"], lab)
+                geo = metrics.match_report(f["labels"], lab, partly_drawn=partly_drawn)
+                g2 = metrics.match_report_2d(f["labels"], lab, partly_drawn=partly_drawn)
                 ct = refine.crosstalk_report(f["responses"], lab, f["spacing"])
                 rows.append({
                     "fly": f["name"], "rois": kind, "n": len(np.unique(lab)) - 1,
                     "recall": geo.get("recall", ""), "precision": geo.get("precision", ""),
                     "dice": geo.get("mean_dice_matched", ""), "splits": geo.get("splits", ""), "merges": geo.get("merges", ""),
-                    "n_2d": g2["n_pred"], "recall_2d": g2["recall"], "precision_2d": g2["precision"],
+                    "n_scored": geo["n_scored"], "n_2d": g2["n_pred"], "n_scored_2d": g2["n_scored"],
+                    "recall_2d": g2["recall"], "precision_2d": g2["precision"],
                     "dice_2d": g2["mean_dice_matched"],
                     "coherence": np.mean(list(ct["coherence"].values())) if ct["coherence"] else "",
                     "neighbor_corr": np.mean(list(ct["neighbor_corr"].values())) if ct["neighbor_corr"] else "",
                     "leak": np.mean(np.abs(list(ct["leak"].values()))) if ct["leak"] else "",
                 })
-                iou, g_ids, p_ids = metrics.iou_matrix(f["labels"], lab)
+                if partly_drawn:
+                    iou, g_ids, p_ids, _ = metrics.iou_matrix_partly_drawn(f["labels"], lab)
+                else:
+                    iou, g_ids, p_ids = metrics.iou_matrix(f["labels"], lab)
                 correct = total = 0
                 id_lines = []
                 for j, pl in enumerate(p_ids):
@@ -328,7 +339,7 @@ class Model:
                 w.writerows(glom)
         clean = lambda v: float(v) if isinstance(v, (float, np.floating)) else v  # noqa: E731
         return {"summary": [{k: clean(v) for k, v in r.items()} for r in rows], "identity": id_rows, "glomeruli": glom,
-                "final": final}
+                "final": final, "scoring": "partly drawn" if partly_drawn else "strict"}
 
 
 def fit(flies, val=(), options: Options | None = None, out=None, progress=None, odors=None, aliases=None,

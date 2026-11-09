@@ -22,7 +22,8 @@ database's glomerulus names (and numbered ROIs).
 
 Last, checks that the options of how Cellpose's masks are made and joined into 3D objects reach it,
 are saved with a model, and that alseg-predict's replace the model's; and the joining of masks of
-adjacent planes by overlap and tuning (`segment.join_planes`).
+adjacent planes by overlap and tuning (`segment.join_planes`), and the scoring of ROIs drawn on some
+planes only (`metrics.match_report`'s ``partly_drawn``).
 
 Options after smoke_test.py are passed on to every run, e.g. --deterministic.
 """
@@ -178,3 +179,19 @@ assert j[1, 0, 5] == j[0, 0, 15] != j[0, 0, 0] and len(np.unique(j)) == 4, np.un
 k = segment.join_planes(masks, resp, min_corr=-1)
 assert k[1, 0, 5] == k[0, 0, 0], "joined by overlap alone, it should be A's"
 print("masks of adjacent planes joined by overlap and tuning")
+
+# scoring ROIs drawn on some planes only: glomerulus 1 drawn on plane 1, predicted on planes 0-2 (on 2
+# partly in glomerulus 2's outline); 7 and 9 lie where nothing is drawn
+from alseg import metrics  # noqa: E402
+
+gt = np.zeros((3, 10, 10), int)
+gt[1, 2:8, 2:8], gt[2, 2:8, 6:10] = 1, 2
+pred = np.zeros_like(gt)
+pred[:, 2:8, 2:8], pred[0, :2, 8:], pred[2, 8:, :] = 5, 7, 9
+strict, partly = metrics.match_report(gt, pred), metrics.match_report(gt, pred, partly_drawn=True)
+assert strict["tp"] == 0 and (strict["n_scored"], strict["precision"]) == (3, 0.0), strict
+# (plane 0 left out; plane 2 counts only where glomerulus 2 is: IoU 36 / (36 + 12))
+assert partly["tp"] == 1 and partly["n_scored"] == 1 and abs(partly["dice_per_gt"][1] - 2 * 0.75 / 1.75) < 1e-6, partly
+two = metrics.match_report_2d(gt, pred, partly_drawn=True)
+assert (two["tp"], two["n_pred"], two["n_scored"]) == (1, 5, 1), two
+print("ROIs drawn on some planes only scored as such")
