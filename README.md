@@ -23,6 +23,84 @@ pip install "hong2p @ git+https://github.com/ejhonglab/hong2p" "al-diag-seg @ gi
 which gives the commands `alseg-fit` (the same as `python run_pipeline.py`) and
 `alseg-predict`.
 
+## What a fit and a prediction read from each fly
+
+A fit reads six kinds of file per fly (the database's fits in place on tensor, `alseg-fit`
+from a download of them) and reduces them to a 3-channel image per plane plus label
+volumes; prediction reads the same files minus the ROIs. As of 2026-11-13 the database's
+AL Segmentation tab lists the same 86 flies its fit 7 used (62 Sam's, 24 Tom's; 82 trained
+on, 4 held out), so the numbers below are from fit 7 and the files as they were that day.
+
+### Training: files read per fly
+
+| File | Dimensions | Becomes |
+|---|---|---|
+| `<analysis>/<date>/<fly>/<recording>/trialmean_dff.tif`, one per diagnostic recording (3 per fly) | (odor, Z, Y, X) float32, mean dF/F per odor. 10, 10 and 4–5 odors; Z = 7–11 planes (10 in 58 flies); Y = X = 192 | Joined along odor (24–25), cut to the 20 odors every fly has: `responses` (20, Z, 192, 192) |
+| `<recording>/trial_frames_and_odors.json` | one entry per trial | Odor names only, to label the odor axis. The database reads it; al-diag-seg does not open it in a fit |
+| `<fly>/mocorr_concat_avg.tif` | (Z, Y, X) float32 | `average`. Only Tom's 24 flies have it; for Sam's 62, the database takes the mean over time of `mocorr_concat.tif` (time, Z, Y, X) and caches it in its `data/roi_training/` |
+| `<recording>/RoiSet.zip` (the real file, in a diagnostic recording folder) | ImageJ polygons, each on one plane; 75–175 per fly | Two label volumes (Z, Y, X), below |
+| `<raw>/<date>/<fly>/<recording>/Experiment.xml` | – | Voxel size (z, y, x): 10 µm × 0.47–0.58 µm (median 0.553) |
+| `<raw>/<date>/<fly>/anat/ChanA_*.tif` and its `Experiment.xml` (14 flies, all Tom's, Apr 2023–Jan 2024) | 181–281 planes × 5 frames of 384 × 384 uint16, averaged over frames to (Z, Y, X) at 0.5 × ~0.25 µm | Registration image for the atlas |
+
+The TIFFs' own axis labels call the odor axis T. NaN/inf dF/F values are set to 0.
+
+### Training: what is built from them
+
+- **`channels` (3, Z, Y, X)**, each scaled to 0–1 by the volume's 1st–99.5th percentiles:
+  - 0: the average image.
+  - 1: correlation of each voxel's 20-odor response with its 3 × 3 in-plane neighbours.
+  - 2: the first principal component of the per-voxel response vectors.
+- **`labels` (Z, Y, X)**: named glomeruli and `_t<n>` tentative ones, same name across
+  planes as one 3D label. This is 7,013 of the 10,730 outlines, 34–43 glomeruli per fly.
+- **`seg_labels` (Z, Y, X)**: those plus numbered and `?` ROIs (8,240 outlines). `+` ROIs
+  and `AL`/`AL_plane<n>` outlines are left out.
+
+Each step then uses:
+
+1. **PCA basis** (mean (20,), components (3, 20)): training flies' `responses` at voxels
+   inside `labels`.
+2. **Cellpose fine-tuning**: one example per plane, a (Y, X, 3) image from `channels` and a
+   (Y, X) mask from `seg_labels`, eroded 1 px.
+   - Planes are resampled in-plane to 0.553 µm (192 px becomes 163–202) and never mixed
+     across Z.
+   - The 82 training flies give 792 planes, doubled to 1,584 by one flipped/rotated copy
+     each.
+   - The 4 held-out flies' 39 planes give only the validation loss.
+3. **Naming template**: per glomerulus (47), mean tuning (20,), centroid (3,) in µm and
+   shape (4,), from training flies' `responses`, `labels` and voxel size.
+4. **Atlas**: template (91, 96, 96) at 1 µm and probability maps (55, 91, 96, 96).
+   - Each training fly's anat stack, or its `average` if it has none, is registered to one
+     fly's stack.
+   - Its `labels` are warped in.
+   - 8 of the 55 glomeruli come from the Grabe 2016 reference, not from flies.
+
+Held-out flies are in none of steps 1, 3 and 4.
+
+### Prediction: files read
+
+You give the fly's motion-corrected folder and its raw folder (`load_fly` in
+`alseg/fly.py`).
+
+- **Responses**: every subfolder with `trialmean_dff.tif` and
+  `trial_frames_and_odors.json` where more than half the odors are the model's 20. They
+  are reordered to (20, Z, Y, X); the fly must have all 20, and extra odors are ignored.
+- **Average**: `mocorr_concat_avg.tif`, else the mean of `mocorr_concat.tif`, computed in
+  memory.
+- **Voxel size**: `Experiment.xml` of one of those recordings in the raw folder.
+- **Anat stack**: the first `anat*/` folder in the raw folder, if there is one.
+- **`RoiSet.zip`**: optional, used only to score the result, never as input.
+
+From the model folder it uses `segmenter` (the weights), `pca.npz`, `template.json`,
+`atlas.npz` and `model.json`.
+
+The same `channels` go through Cellpose plane by plane at 0.553 µm. `responses` are used
+again to join planes into 3D ROIs and, with the template and atlas, to name them.
+
+### Never read
+
+The movies themselves (apart from that mean), per-trial `trial_dff.tif`, non-diagnostic
+recordings such as megamat, and the 4–5 odors per fly outside the common 20.
+
 ## Running a model on your flies
 
 A fit (`alseg-fit`, or the database's) writes its model to a folder (`model/`). To segment
