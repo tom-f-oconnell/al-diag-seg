@@ -13,7 +13,7 @@ import numpy as np
 
 from . import atlas, olfdb, roi_io
 from .fly import load_fly
-from .model import Model, Options, fit, write_volume
+from .model import Model, Options, fit, write_identity_terms, write_volume
 
 FIT_DOC = """End-to-end example: ImageJ ROIs + odor responses -> trained model -> named, refined ROIs.
 
@@ -56,7 +56,8 @@ Writes to --out: the model, model/ (everything a new fly is segmented and named 
 run it on your own flies with alseg-predict); per held-out fly, each kind of ROIs
 (pred: Cellpose's; refined_tuning; refined_prior) as labels, <fly>_<kind>.tif, and as an
 ImageJ RoiSet named by glomerulus, <fly>_<kind>_RoiSet.zip; <fly>_atlas_maxprob.tif;
-<fly>_identities_<kind>.csv; and summary.csv (one row per fly and kind of ROIs: matched to
+<fly>_identities_<kind>.csv and <fly>_identity_terms_<kind>.json (what each name cost: see
+--max-cost); and summary.csv (one row per fly and kind of ROIs: matched to
 the manual ROIs as 3D objects, and plane by plane, *_2d),
 glomeruli.csv (per glomerulus: in how many held-out flies it was found and named right),
 name_table.json, and Cellpose's own files under models/.
@@ -127,6 +128,17 @@ def _mask_args(g, fit: bool) -> None:
                    + (model % o.join_corr if model else ""))
 
 
+def _max_cost_arg(g, fit: bool) -> None:
+    """The most a name may cost: an option of a model fit (saved with it), or of a prediction."""
+    d = Options().max_cost
+    g.add_argument("--max-cost", type=float, default=d if fit else None, metavar="C",
+                   help="the most naming an ROI as a glomerulus may cost: one that none costs less for is left "
+                        "unnamed (numbered). The cost is the weighted mean of its terms (odor tuning, position, "
+                        "shape, atlas overlap, layout; each 0 for a perfect fit), which <fly>_identity_terms*.json "
+                        "has for each ROI's 5 best glomeruli; higher names more ROIs, less surely"
+                        + ("" if fit else f". Default: the model's (models saved without it: {d})"))
+
+
 def _parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=FIT_DOC, epilog=EXAMPLES, formatter_class=_HelpFormatter)
     ap.add_argument("data", type=Path,
@@ -187,6 +199,7 @@ def _parser() -> argparse.ArgumentParser:
                    help="the ROIs to use (written as <fly>_RoiSet.zip by alseg-predict, and scored as the "
                         "final ones): Cellpose's own, named (pred); or refined by odor tuning and the atlas "
                         "(refined: on real flies, this shrank and broke up Cellpose's ROIs)")
+    _max_cost_arg(g, fit=True)
     g.add_argument("--w-prior", type=float, default=0.5, metavar="W",
                    help="weight of the atlas prior relative to odor tuning in refinement. Higher "
                         "lets the atlas overrule tuning more; on synthetic data >= 1 shrinks or "
@@ -266,6 +279,7 @@ def fit_main(argv=None):
                     atlas=not a.no_atlas, reg=a.reg, hires_reg=a.hires_reg, atlas_um=a.atlas_um, w_prior=a.w_prior,
                     refs=[str(r) for r in a.ref], ref_side=a.ref_side, ref_reg=a.ref_reg, ref_weight=a.ref_weight,
                     tentative=not a.no_tentative, gpu=False if a.cpu else None, segmenter=a.segmenter, final=a.final,
+                    max_cost=a.max_cost,
                     **{k: getattr(a, k) for k in MASK_OPTIONS})
         model = fit(flies, a.val, o, out=a.out, odors=data["odors"], aliases=data["aliases"], glomeruli=data["glomeruli"],
                     weights=a.model if a.skip_train else None)
@@ -292,7 +306,8 @@ by their names as recorded; it must have all of them.
 Writes to --out, per fly: <fly>_RoiSet.zip, its ROIs named by glomerulus (numbered where none
 fits), for ImageJ and al_analysis; each kind of ROIs as labels, <fly>_<kind>.tif (pred:
 Cellpose's; refined_tuning; refined_prior, with the atlas) and as a RoiSet,
-<fly>_<kind>_RoiSet.zip; <fly>_identities.csv. Flies with ROIs of their own (RoiSet.zip)
+<fly>_<kind>_RoiSet.zip; <fly>_identities.csv, and what each name cost,
+<fly>_identity_terms.json (see --max-cost). Flies with ROIs of their own (RoiSet.zip)
 are also scored against them (summary.csv, glomeruli.csv, as alseg-fit's).
 """
 
@@ -323,6 +338,7 @@ def predict_main(argv=None):
     ap.add_argument("--out", type=Path, default=Path("predictions"), metavar="DIR", help="output folder, created if needed")
     ap.add_argument("--cpu", action="store_true", help="run Cellpose on the CPU (slower) even if there is a GPU")
     _mask_args(ap, fit=False)
+    _max_cost_arg(ap, fit=False)
     a = ap.parse_args(argv)
     if not (a.model / "model.json").is_file():
         ap.error(f"{a.model} is not a model's folder (no model.json)")
@@ -336,6 +352,8 @@ def predict_main(argv=None):
     for k in MASK_OPTIONS:
         if getattr(a, k) is not None:
             setattr(model.options, k, getattr(a, k))
+    if a.max_cost is not None:
+        model.options.max_cost = a.max_cost
     if a.export:
         data = olfdb.load_export(a.export, tentative=model.options.tentative)
         flies = [f for f in data["flies"] if not a.flies or f["name"] in a.flies]
@@ -363,6 +381,7 @@ def predict_main(argv=None):
                 w = csv.writer(fh)
                 w.writerow(["label", "assigned", "cost", "confidence"])
                 w.writerows([l, name or "", f"{cost:.3f}", f"{conf:.3f}"] for l, (name, cost, conf) in sorted(p["identities"][final].items()))
+            write_identity_terms(a.out / f"{f['name']}_identity_terms.json", p["identity_terms"][final])
         shutil.copyfile(a.out / f"{f['name']}_{final}_RoiSet.zip", a.out / f"{f['name']}_RoiSet.zip")
         print(f"{f['name']}: {a.out / (f['name'] + '_RoiSet.zip')}")
 

@@ -74,6 +74,9 @@ class Options:
     join: str = "tuning"
     join_overlap: float = 0.2
     join_corr: float = 0.7
+    # the most naming an ROI as a glomerulus may cost (`identity.assign_identities`): an ROI none
+    # costs less for is left unnamed (numbered); also for models saved before it was an option
+    max_cost: float = 0.6
 
 
 def use_gpu(gpu: bool | None) -> bool:
@@ -113,6 +116,21 @@ def write_volume(path, a: np.ndarray) -> None:
     """A (Z, Y, X) volume as an ImageJ stack of planes (as al_analysis' TIFFs are), so that
     one of 3 or 4 planes is not taken for a colour image."""
     tifffile.imwrite(path, a, imagej=True, metadata={"axes": "ZYX"})
+
+
+def write_identity_terms(path, terms: dict) -> None:
+    """What the costs of naming a fly's ROIs are made of (`identity.assign_identities`'s
+    ``return_terms``), as JSON: each ROI by its label (in the fly's label .tif of that kind)."""
+    def clean(v):
+        if isinstance(v, dict):
+            return {str(k): clean(x) for k, x in v.items()}
+        if isinstance(v, (list, tuple)):
+            return [clean(x) for x in v]
+        if isinstance(v, (float, np.floating)):
+            return float(v) if np.isfinite(v) else None
+        return v
+
+    Path(path).write_text(json.dumps(clean(terms), indent=1))
 
 
 def _stand_in(fly) -> np.ndarray:
@@ -190,8 +208,9 @@ class Model:
         Returns:
             dict with ``labels``: each kind of ROIs ('pred': Cellpose's; 'refined_tuning';
             'refined_prior', with the atlas), ``identities``: for each, {label: (name or
-            None, cost, confidence)}, ``final``: the kind to use, ``atlas_maxprob``: the
-            atlas on the fly's grid (its largest probability), or None.
+            None, cost, confidence)}, ``identity_terms``: for each, what those costs are
+            made of (`identity.assign_identities`), ``final``: the kind to use,
+            ``atlas_maxprob``: the atlas on the fly's grid (its largest probability), or None.
         """
         o, resp, sp = self.options, fly["responses"], fly["spacing"]
         if self.segmenter == "stand-in":
@@ -203,24 +222,28 @@ class Model:
                                    dilate=o.dilate, responses=resp if o.join == "tuning" else None,
                                    join_overlap=o.join_overlap, join_corr=o.join_corr)
         labels = {"pred": pred, "refined_tuning": refine.refine_by_tuning(resp, pred, sp)}
-        ids = {"refined_tuning": identity.assign_identities(resp, labels["refined_tuning"], self.template, sp,
-                                                            w_shape=0, w_layout=0)}
+        ids, terms = {}, {}
+
+        def name(kind, *args, **kw):
+            ids[kind], terms[kind] = identity.assign_identities(resp, labels[kind], self.template, sp, *args,
+                                                                max_cost=o.max_cost, return_terms=True, **kw)
+
+        name("refined_tuning", w_shape=0, w_layout=0)
         maxprob = None
         if self.atlas is not None:
             if fly.get("hires") and fly["hires"].get("mirror") is None:
                 atlas_mod.orient_hires(fly, o.hires_reg)
             prior = atlas_mod.atlas_to_fly(self.atlas, fly, transform=o.reg, hires_transform=o.hires_reg)
             # name the raw prediction first so the prior knows which glomerulus each ROI is
-            ids["pred"] = identity.assign_identities(resp, pred, self.template, sp, prior, self.atlas.names)
+            name("pred", prior, self.atlas.names)
             names0 = {l: v[0] for l, v in ids["pred"].items()}
             labels["refined_prior"] = refine.refine_with_prior(resp, pred, names0, prior, self.atlas.names, sp,
                                                                w_prior=o.w_prior)
-            ids["refined_prior"] = identity.assign_identities(resp, labels["refined_prior"], self.template, sp, prior,
-                                                              self.atlas.names)
+            name("refined_prior", prior, self.atlas.names)
             maxprob = prior.max(0).astype(np.float32)
         else:
-            ids["pred"] = identity.assign_identities(resp, pred, self.template, sp, w_shape=0, w_layout=0)
-        return {"labels": labels, "identities": ids, "atlas_maxprob": maxprob,
+            name("pred", w_shape=0, w_layout=0)
+        return {"labels": labels, "identities": ids, "identity_terms": terms, "atlas_maxprob": maxprob,
                 "final": self.final_kind()}
 
     def final_kind(self) -> str:
@@ -235,7 +258,8 @@ class Model:
 
         Writes to ``out`` (if given), per fly: each kind's labels (``<fly>_<kind>.tif``) and
         RoiSet.zip, named (``<fly>_<kind>_RoiSet.zip``), its identities
-        (``<fly>_identities_<kind>.csv``), the atlas on its grid; and ``summary.csv``,
+        (``<fly>_identities_<kind>.csv``) and what their costs are made of
+        (``<fly>_identity_terms_<kind>.json``), the atlas on its grid; and ``summary.csv``,
         ``glomeruli.csv``.
 
         Returns:
@@ -278,6 +302,7 @@ class Model:
                 if out:
                     write_volume(out / f"{f['name']}_{kind}.tif", lab.astype(np.uint16))
                     roi_io.write_roiset(lab, names, out / f"{f['name']}_{kind}_RoiSet.zip")
+                    write_identity_terms(out / f"{f['name']}_identity_terms_{kind}.json", p["identity_terms"][kind])
                 geo = metrics.match_report(f["labels"], lab, partly_drawn=partly_drawn)
                 g2 = metrics.match_report_2d(f["labels"], lab, partly_drawn=partly_drawn)
                 ct = refine.crosstalk_report(f["responses"], lab, f["spacing"])

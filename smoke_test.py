@@ -168,6 +168,29 @@ cli.predict_main(["syn_results/stand_in/model", "--export", "syn", "--flies", VA
 assert seen == {**{k: getattr(Options(), k) for k in MASK_OPTIONS}, "cellprob_threshold": -1.5, "dilate": 3}, seen
 print("mask options saved with the model, and alseg-predict's used instead where given")
 
+# what each name cost: the terms add up to the cost, names costing more than --max-cost are not given
+assert saved["max_cost"] == Options().max_cost, saved
+terms = json.loads(Path(f"syn_results/predict_export/{VAL[1]}_identity_terms_pred.json").read_text())
+w = {k: v for k, v in terms["weights"].items() if v}
+assert terms["max_cost"] == Options().max_cost and abs(sum(w.values()) - terms["weight_sum"]) < 1e-9, terms["weights"]
+n_named = 0
+for lab, r in terms["rois"].items():
+    cands = r["candidates"]
+    assert 1 <= len(cands) <= 6 and [c["cost"] for c in cands[:5]] == sorted(c["cost"] for c in cands[:5]), cands
+    for c in cands:
+        assert abs(sum(w[k] * (c[k] or 0) for k in w) / terms["weight_sum"] - c["cost"]) < 1e-9, c
+    if r["assigned"]:
+        n_named += 1
+        got = next(c for c in cands if c["name"] == r["assigned"])
+        assert got["cost"] <= terms["max_cost"] and got["taken_by"] is None and abs(got["cost"] - r["cost"]) < 1e-9, r
+assert n_named, terms
+cli.predict_main(["syn_results/stand_in/model", "--export", "syn", "--flies", VAL[1], "--out", "syn_results/predict_max_cost",
+                  "--max-cost", "0"])
+none = json.loads(Path(f"syn_results/predict_max_cost/{VAL[1]}_identity_terms_pred.json").read_text())
+assert none["max_cost"] == 0 and not any(r["assigned"] for r in none["rois"].values()), none
+assert all(r.name.isdigit() for r in roifile.ImagejRoi.fromfile(f"syn_results/predict_max_cost/{VAL[1]}_RoiSet.zip"))
+print(f"each name's cost is the weighted mean of its terms ({n_named} ROIs named); none named at --max-cost 0")
+
 # masks of adjacent planes joined one to one, by overlap and tuning: the second plane's mask overlaps
 # A more than B, but is tuned like B (Cellpose's stitching, by IoU, would join it to A)
 masks = np.zeros((2, 16, 20), int)

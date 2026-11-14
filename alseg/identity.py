@@ -21,6 +21,9 @@ from scipy.optimize import linear_sum_assignment
 
 from .refine import neighbors, roi_tuning
 
+# the terms of the cost of naming an ROI as a glomerulus (see above), in the order they are added
+TERMS = ("tuning", "position", "shape", "atlas", "layout")
+
 
 def _z(v):
     v = np.asarray(v, float)
@@ -110,6 +113,8 @@ def assign_identities(
     n_layout_iter: int = 3,
     max_cost: float = 0.6,
     unknown_cost: float = 0.5,
+    return_terms: bool = False,
+    n_best: int = 5,
 ):
     """Match predicted ROIs to template glomeruli.
 
@@ -124,7 +129,17 @@ def assign_identities(
     are left unassigned instead of forced.
 
     Returns {label: (name or None, cost, confidence)}; confidence is the gap
-    between the best and second-best glomerulus for that ROI.
+    between the best and second-best glomerulus for that ROI. With
+    ``return_terms``, also what the costs are made of (a tuple of the two):
+    ``weights`` (of each of `TERMS`; None for one that is off: the atlas term
+    without an atlas), ``weight_sum``, ``max_cost``, ``unknown_cost`` and
+    ``rois``: {label: {"assigned", "cost", "confidence", "candidates"}}, the
+    candidates the ``n_best`` glomeruli of least cost for that ROI (and the
+    one it was named, if not among them), least first, each with its ``name``,
+    ``cost`` (as compared with ``max_cost``), the value of each term before it
+    is weighted (None where it has none), ``reference`` (not in the template:
+    its tuning and shape terms are ``unknown_cost``) and ``taken_by`` (the
+    label of another ROI given that name, else None).
     """
     sp = np.asarray(spacing_zyx, float)
     feats = roi_features(responses, labels, sp)
@@ -145,6 +160,7 @@ def assign_identities(
     pos_sd = np.array([template[n]["centroid_sd"] if n in template else default_sd for n in names])
 
     base = np.zeros((nL, nN))
+    parts = {k: np.full((nL, nN), np.nan) for k in TERMS}
     for i, l in enumerate(labs):
         f = feats[l]
         for j, n in enumerate(names):
@@ -159,15 +175,19 @@ def assign_identities(
             base[i, j] = (w_tuning * tuning_cost
                           + w_position * min(d, 4.0) / 4.0
                           + w_shape * shape_cost)
+            parts["tuning"][i, j], parts["position"][i, j], parts["shape"][i, j] = tuning_cost, min(d, 4.0) / 4.0, shape_cost
     if prior is not None and w_atlas:
         pidx = {n: k for k, n in enumerate(prior_names)}
         for i, l in enumerate(labs):
             m = labels == l
             for j, n in enumerate(names):
                 if n in pidx:
-                    base[i, j] += w_atlas * (1 - float(prior[pidx[n]][m].mean()))
+                    parts["atlas"][i, j] = 1 - float(prior[pidx[n]][m].mean())
+                    base[i, j] += w_atlas * parts["atlas"][i, j]
 
     active = w_tuning + w_position + w_shape + w_layout + (w_atlas if prior is not None else 0)
+    weights = {"tuning": w_tuning, "position": w_position, "shape": w_shape,
+               "atlas": w_atlas if prior is not None else None, "layout": w_layout}
     base /= active
     w_layout = w_layout / active
 
@@ -179,8 +199,9 @@ def assign_identities(
         if np.array_equal(new, assign):
             break
         assign = new
-    cost = base + (w_layout * _layout_cost(labs, nb, roi_pos, exp_pos, pos_sd, assign)
-                   if w_layout else 0)
+    if w_layout:
+        parts["layout"] = _layout_cost(labs, nb, roi_pos, exp_pos, pos_sd, assign)
+    cost = base + (w_layout * parts["layout"] if w_layout else 0)
 
     out = {}
     for i, l in enumerate(labs):
@@ -188,7 +209,21 @@ def assign_identities(
         conf = float(srt[1] - srt[0]) if nN > 1 else np.inf
         j = assign[i]
         out[l] = (names[j] if j >= 0 else None, float(cost[i, j]) if j >= 0 else max_cost, conf)
-    return out
+    if not return_terms:
+        return out
+    taken = {int(j): labs[i] for i, j in enumerate(assign) if j >= 0}
+    rois = {}
+    for i, l in enumerate(labs):
+        best = [int(j) for j in np.argsort(cost[i], kind="stable")[:n_best]]
+        if assign[i] >= 0 and int(assign[i]) not in best:
+            best.append(int(assign[i]))
+        rois[int(l)] = {"assigned": out[l][0], "cost": out[l][1], "confidence": out[l][2], "candidates": [
+            {"name": names[j], "cost": float(cost[i, j]),
+             **{k: None if np.isnan(parts[k][i, j]) else float(parts[k][i, j]) for k in TERMS},
+             "reference": names[j] not in template,
+             "taken_by": int(taken[j]) if j in taken and taken[j] != l else None} for j in best]}
+    return out, {"weights": weights, "weight_sum": float(active), "max_cost": max_cost, "unknown_cost": unknown_cost,
+                 "rois": rois}
 
 
 def _solve(cost, max_cost):

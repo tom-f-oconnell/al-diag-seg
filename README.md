@@ -112,7 +112,9 @@ sizes from `Experiment.xml`, and an `anat/` stack if there is one):
 alseg-predict model/ --fly /local/tensor/Ann/analysis/2026-03-31/1 --raw /local/tensor/Ann/raw/2026-03-31/1 --out pred/
 ```
 Each fly's `<fly>_RoiSet.zip` has its ROIs named by glomerulus (numbered where none
-fits), per plane, as ImageJ and al_analysis read them. Its odors are matched to the
+fits: none costing `--max-cost` or less, 0.6 unless the model was fit with another), per
+plane, as ImageJ and al_analysis read them; `<fly>_identity_terms.json` has what each name
+cost (each term's value for the ROI's 5 best glomeruli, and the weights). Its odors are matched to the
 model's by their names as recorded; it needs all of them (the ones it lacks are listed).
 It runs on a CPU too (slower). Flies with a `RoiSet.zip` of their own are also scored
 against it. `alseg-predict -h` has the rest (e.g. `--export`, for flies of a database
@@ -182,7 +184,7 @@ baseline is 0); they are taken as 0, and counted as they are read.
 
 * **Order of operations.** Predict → name the raw ROIs (needs to know which glomerulus each ROI is before it can apply that glomerulus's prior) → refine with the prior → name again.
 * **`w_prior`** sets how much the atlas can overrule the tuning. Leaving a voxel unassigned costs the same as joining an ROI at `min_corr` with a neutral prior of 0.5, so a high prior lowers the tuning evidence needed and a low prior raises it.
-* **Identity weights** (`w_tuning`, `w_position`, `w_shape`, `w_atlas`, `w_layout`) are normalized by their sum, so `max_cost` keeps its meaning when you turn terms on or off.
+* **Identity weights** (`w_tuning`, `w_position`, `w_shape`, `w_atlas`, `w_layout`) are normalized by their sum, so `max_cost` (`--max-cost`, saved with a model: an ROI no glomerulus costs less for stays numbered) keeps its meaning when you turn terms on or off. `<fly>_identity_terms*.json` has each term's value, before weighting, for every ROI's 5 best glomeruli, and which other ROI was given a name it did not get.
 * **Keep priors soft.** An atlas from a few flies is blurry; on synthetic data a strong prior (`w_prior` ≥ 1) shrinks or drops ROIs. Tune weights on held-out flies against both Dice and crosstalk.
 
 Synthetic results (2 held-out flies, 6-fly atlas, ROIs that overshoot by 2 px as the
