@@ -237,7 +237,8 @@ def predict(
     responses: np.ndarray | None = None,
     join_overlap: float = 0.2,
     join_corr: float = 0.7,
-) -> np.ndarray:
+    return_cellprob: bool = False,
+) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     """Segment a fly. channels: (C, Z, Y, X). Returns (Z, Y, X) labels.
 
     Pass the ``xy_um`` the model was trained at, and the fly's voxel size
@@ -250,6 +251,12 @@ def predict(
     The planes' masks are joined into 3D objects by `join_planes` if ``responses`` (the fly's,
     (n_odors, Z, Y, X)) are given, with ``join_overlap`` and ``join_corr``; otherwise by
     Cellpose (each mask to its best match by IoU in the plane before, if >= ``stitch_threshold``).
+    ``return_cellprob``: also return Cellpose's cell probability map ((Z, Y, X) float32, on the
+    fly's grid, resampled bilinearly from the model's): logits, as ``cellprob_threshold`` is (its
+    masks are of pixels over that), for `alseg.clean_margin.core`.
+
+    Returns:
+        the labels, or (labels, cell probability map) with ``return_cellprob``.
     """
     from cellpose import models, utils
 
@@ -259,12 +266,13 @@ def predict(
     stack = np.moveaxis(channels, 0, -1)  # (Z, Y, X, C)
     kw = dict(channel_axis=-1, do_3D=False, diameter=diameter, normalize=False, cellprob_threshold=cellprob_threshold,
               flow_threshold=flow_threshold)
+    # (eval returns masks, [flows as RGB, flows, cell probability], styles; squeezed, so of one plane (Y, X))
     if responses is None:
-        masks, _, _ = model.eval(stack, z_axis=0, stitch_threshold=stitch_threshold, **kw)
+        masks, flows, _ = model.eval(stack, z_axis=0, stitch_threshold=stitch_threshold, **kw)
         masks = resize_xy(np.asarray(masks).reshape(stack.shape[:3]), native, 0)
     else:
         # each plane on its own (no minimum size yet, as when Cellpose stitches: it is of the objects)
-        masks, _, _ = model.eval(stack, z_axis=None, stitch_threshold=0.0, min_size=-1, **kw)
+        masks, flows, _ = model.eval(stack, z_axis=None, stitch_threshold=0.0, min_size=-1, **kw)
         masks = resize_xy(np.asarray(masks).reshape(stack.shape[:3]).astype(np.int32), native, 0)
         masks = join_planes(masks, responses, join_overlap, join_corr)
         masks = utils.fill_holes_and_remove_small_masks(masks, min_size=15)
@@ -272,6 +280,9 @@ def predict(
         from skimage.segmentation import expand_labels
 
         masks = np.stack([expand_labels(m, dilate) for m in masks])
+    if return_cellprob:
+        prob = np.asarray(flows[2], np.float32).reshape(stack.shape[:3])
+        return masks, resize_xy(prob, native, 1)
     return masks
 
 
