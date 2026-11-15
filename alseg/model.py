@@ -28,7 +28,7 @@ import numpy as np
 import tifffile
 
 from . import atlas as atlas_mod
-from . import identity, metrics, refine, reference, responses, roi_io, segment
+from . import clean, identity, metrics, refine, reference, responses, roi_io, segment
 
 FORMAT = 1
 STAGES = ("load", "train", "atlas", "evaluate")
@@ -45,7 +45,9 @@ class Options:
     pixels, so only works on flies with ROIs). ``final``: the ROIs a fly's are (`Model.final_kind`):
     "pred", Cellpose's own, named (with the atlas, if there is one); or "refined", refined by odor
     tuning and the atlas (on real flies, refinement shrank and broke up Cellpose's ROIs: see the
-    README)."""
+    README); or "clean", Cellpose's own after the steps of ``clean`` (`alseg.clean.STEPS`, each with
+    its parameters, ``clean_params``: {step: {name: value}}; none: as "pred"). Each step alone is a
+    kind of ROIs of its own too (``clean_<step>``), to compare them by."""
     epochs: int = 200
     erode: int = 1
     xy_um: float | None = None
@@ -77,6 +79,11 @@ class Options:
     # the most naming an ROI as a glomerulus may cost (`identity.assign_identities`): an ROI none
     # costs less for is left unnamed (numbered); also for models saved before it was an option
     max_cost: float = 0.6
+    # masks over two glomeruli split by their tuning before the planes' are joined (`alseg.clean_trim.split`,
+    # with clean_params["split"]): changes Cellpose's ROIs themselves, so every kind
+    split: bool = False
+    clean: list[str] = field(default_factory=list)
+    clean_params: dict = field(default_factory=dict)
 
 
 def use_gpu(gpu: bool | None) -> bool:
@@ -133,11 +140,11 @@ def write_identity_terms(path, terms: dict) -> None:
     Path(path).write_text(json.dumps(clean(terms), indent=1))
 
 
-def _purity(responses, labels, spacing) -> dict:
+def _purity(responses, labels, spacing, ref=None) -> dict:
     """`refine.purity_report` as a row's columns: medians of ``gap_um``, ``edge_share`` and
     ``whole_share``, and ``touching``, the fraction of in-plane masks touching another ROI ('' where
     there is none to take them of)."""
-    r = refine.purity_report(responses, labels, spacing)
+    r = refine.purity_report(responses, labels, spacing, ref=ref)
     med = lambda v: float(np.median(v)) if len(v) else ""  # noqa: E731
     return {"gap_um": med(r["gap_um"]), "touching": float(np.mean(np.array(r["gap_um"]) <= 0)) if r["gap_um"] else "",
             "edge_share": med(r["edge_share"]), "whole_share": med(r["whole_share"])}
@@ -227,10 +234,18 @@ class Model:
             pred = _stand_in(fly)
         else:
             channels = responses.build_channels(fly["average"], resp, self.pca)
-            pred = segment.predict(self.segmenter, channels, gpu=use_gpu(o.gpu), spacing=sp, xy_um=self.xy_um,
-                                   cellprob_threshold=o.cellprob_threshold, flow_threshold=o.flow_threshold,
-                                   dilate=o.dilate, responses=resp if o.join == "tuning" else None,
-                                   join_overlap=o.join_overlap, join_corr=o.join_corr)
+            split = None
+            if o.split and o.join == "tuning":
+                from . import clean_trim
+
+                clean.ensure_evidence(fly)
+                split = lambda m: clean_trim.split(m, fly, **(o.clean_params.get("split") or {}))  # noqa: E731
+            out = segment.predict(self.segmenter, channels, gpu=use_gpu(o.gpu), spacing=sp, xy_um=self.xy_um,
+                                  cellprob_threshold=o.cellprob_threshold, flow_threshold=o.flow_threshold,
+                                  dilate=o.dilate, responses=resp if o.join == "tuning" else None,
+                                  join_overlap=o.join_overlap, join_corr=o.join_corr, return_cellprob=True, split=split)
+            # (Cellpose's cell probabilities, for `clean`'s core)
+            pred, fly["cellprob"] = out if isinstance(out, tuple) else (out, None)
         labels = {"pred": pred, "refined_tuning": refine.refine_by_tuning(resp, pred, sp)}
         ids, terms = {}, {}
 
@@ -253,14 +268,26 @@ class Model:
             maxprob = prior.max(0).astype(np.float32)
         else:
             name("pred", w_shape=0, w_layout=0)
+        # Cellpose's ROIs cleaned: by each step alone, and by those asked for; named as Cellpose's are
+        kinds = {f"{clean.KIND}_{st}": [st] for st in clean.STEPS if clean.usable(st, fly)}
+        if o.clean:
+            kinds[clean.KIND] = o.clean
+        for kind, steps in kinds.items():
+            labels[kind] = clean.apply(pred, fly, steps, o.clean_params)
+            left = set(np.unique(labels[kind]).tolist())
+            ids[kind] = {l: v for l, v in ids["pred"].items() if l in left}
+            terms[kind] = terms["pred"]
         return {"labels": labels, "identities": ids, "identity_terms": terms, "atlas_maxprob": maxprob,
                 "final": self.final_kind()}
 
     def final_kind(self) -> str:
-        """The kind of ROIs a fly's are (`Options.final`): 'pred' (Cellpose's), else the refined ones:
-        'refined_prior' with the atlas, 'refined_tuning' without."""
-        if self.options.final == "pred":
+        """The kind of ROIs a fly's are (`Options.final`): 'pred' (Cellpose's), 'clean' (Cellpose's after
+        the steps of `Options.clean`), else the refined ones: 'refined_prior' with the atlas,
+        'refined_tuning' without."""
+        if self.options.final == "pred" or (self.options.final == clean.KIND and not self.options.clean):
             return "pred"
+        if self.options.final == clean.KIND:
+            return clean.KIND
         return "refined_prior" if self.atlas is not None else "refined_tuning"
 
     def evaluate(self, flies, out=None, progress=None, partly_drawn: bool = True) -> dict:
@@ -330,7 +357,8 @@ class Model:
                     "coherence": np.mean(list(ct["coherence"].values())) if ct["coherence"] else "",
                     "neighbor_corr": np.mean(list(ct["neighbor_corr"].values())) if ct["neighbor_corr"] else "",
                     "leak": np.mean(np.abs(list(ct["leak"].values()))) if ct["leak"] else "",
-                    **_purity(f["responses"], lab, f["spacing"]),
+                    # (cleaned ROIs' neighbours are those Cellpose's had, however far they now keep)
+                    **_purity(f["responses"], lab, f["spacing"], p["labels"]["pred"] if kind.startswith(clean.KIND) else None),
                 })
                 br = refine.breadth(f["responses"], f["labels"], lab)
                 rows[-1].update(breadth="" if br["pred"] is None else br["pred"],
@@ -381,8 +409,8 @@ class Model:
                 w = csv.DictWriter(fh, fieldnames=["glomerulus", "flies", "detected", "dice", "named"])
                 w.writeheader()
                 w.writerows(glom)
-        clean = lambda v: float(v) if isinstance(v, (float, np.floating)) else v  # noqa: E731
-        return {"summary": [{k: clean(v) for k, v in r.items()} for r in rows], "identity": id_rows, "glomeruli": glom,
+        plain = lambda v: float(v) if isinstance(v, (float, np.floating)) else v  # noqa: E731
+        return {"summary": [{k: plain(v) for k, v in r.items()} for r in rows], "identity": id_rows, "glomeruli": glom,
                 "final": final, "scoring": "partly drawn" if partly_drawn else "strict"}
 
 

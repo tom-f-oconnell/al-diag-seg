@@ -174,7 +174,9 @@ def load(root: Path, entry: dict, name_table=None, keep=None, seg_keep=None) -> 
         odors += r["odors"]
     labels, lut, overlap = roi_io.load_roiset(root / entry["roiset"], avg.shape, name_table, keep=keep)
     xml = next(root / r["experiment_xml"] for r in entry["recordings"] if r.get("experiment_xml"))
-    f = {"name": entry.get("name") or fly_name(entry), "average": avg, "responses": np.concatenate(resp), "odors": odors,
+    # (dir: its folder, as al_analysis leaves it, where `alseg.evidence` reads its per-trial responses)
+    f = {"name": entry.get("name") or fly_name(entry), "dir": (root / entry["recordings"][0]["responses"]).parent.parent,
+         "average": avg, "responses": np.concatenate(resp), "odors": odors,
          "labels": labels, "lut": lut, "overlap": overlap, "spacing": metadata.thorimage_spacing(xml, avg.shape)}
     if seg_keep is not None:
         f["seg_labels"] = roi_io.load_roiset(root / entry["roiset"], avg.shape, keep=seg_keep)[0]

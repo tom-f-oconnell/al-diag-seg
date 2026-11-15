@@ -291,7 +291,8 @@ def _share(v, own, other) -> float:
 
 
 def purity_report(responses: np.ndarray, labels: np.ndarray, spacing=(1.0, 1.0, 1.0), core_um: float = 1.5,
-                  reach_um: float = 2.0, ring_um: float = 1.0, facing_um: float = 3.0, min_core: int = 8) -> dict:
+                  reach_um: float = 2.0, ring_um: float = 1.0, facing_um: float = 3.0, min_core: int = 8,
+                  ref: np.ndarray | None = None) -> dict:
     """How far ROIs keep from each other in-plane, and how much of a neighbour their edges carry.
 
     Per in-plane mask (an ROI on one plane):
@@ -304,35 +305,45 @@ def purity_report(responses: np.ndarray, labels: np.ndarray, spacing=(1.0, 1.0, 
                 and the neighbour's (both weights >= 0): b / (a + b). 0: the edge is the ROI's own.
     whole_share the same of the whole mask's mean tuning: what reaches its signal.
 
+    ``ref``: the ROIs ``labels`` were cleaned from (the same labels, pixels only removed), if they
+    were. Cores and neighbours are then ``ref``'s, so that an ROI drawn back from its neighbour is
+    still measured against it (alone, it would have no neighbour in reach, and so no share), and
+    the edge facing it is the outer ring of the ROI as it is now, as far beyond ``facing_um`` of
+    the neighbour as the ROI drew back from it.
+
     Returns:
         dict with those as lists (a value per mask that has one), and ``n``, the masks.
     """
     core_px, reach, ring, facing_px = (_px(u, spacing) for u in (core_um, reach_um, ring_um, facing_um))
+    ref = labels if ref is None else ref
     gap, edge, whole, n = [], [], [], 0
     for z in range(labels.shape[0]):
-        L = labels[z]
-        masks = {int(l): L == l for l in np.unique(L) if l}
-        n += len(masks)
+        L, R = labels[z], ref[z]
+        n += len(np.unique(L)) - (0 in L)
+        for l in np.unique(L):
+            m = L == l
+            others = (L > 0) & ~m
+            if l and others.any():
+                gap.append(float((ndi.distance_transform_edt(~others)[m].min() - 1) * spacing[1]))
+        masks = {int(l): R == l for l in np.unique(R) if l}
         cores = {}
         for l, m in masks.items():
             c = ndi.binary_erosion(m, iterations=core_px)
             if c.sum() >= min_core:
                 cores[l] = responses[:, z][:, c].mean(1)
         for l, m in masks.items():
-            others = (L > 0) & ~m
-            if not others.any():
-                continue
-            gap.append(float((ndi.distance_transform_edt(~others)[m].min() - 1) * spacing[1]))
-            if l not in cores:
+            now = L == l
+            if l not in cores or not now.any():
                 continue
             halo = ndi.binary_dilation(m, iterations=reach) & ~m
-            ls, k = np.unique(L[halo], return_counts=True)
+            ls, k = np.unique(R[halo], return_counts=True)
             near = [(c, int(x)) for x, c in zip(ls, k) if int(x) in cores]
             if not near:
                 continue
             nb = max(near)[1]
-            f = m & ~ndi.binary_erosion(m, iterations=ring) & (ndi.distance_transform_edt(~masks[nb]) <= facing_px)
-            whole.append(_share(responses[:, z][:, m].mean(1), cores[l], cores[nb]))
+            d = ndi.distance_transform_edt(~masks[nb])
+            f = now & ~ndi.binary_erosion(now, iterations=ring) & (d <= facing_px + d[now].min() - d[m].min())
+            whole.append(_share(responses[:, z][:, now].mean(1), cores[l], cores[nb]))
             if f.sum() >= 4:
                 edge.append(_share(responses[:, z][:, f].mean(1), cores[l], cores[nb]))
     clean = lambda v: [x for x in v if np.isfinite(x)]  # noqa: E731

@@ -95,7 +95,7 @@ def load_fly(mocorr_dir, model, raw_dir=None, spacing=None, name=None, glomeruli
     idx = {}
     for i, o in enumerate(odors):
         idx.setdefault(o, []).append(i)
-    f = {"name": name or f"{d.parent.name}_{d.name}", "average": avg, "odors": list(model.odors),
+    f = {"name": name or f"{d.parent.name}_{d.name}", "dir": d, "average": avg, "odors": list(model.odors),
          "responses": np.stack([allr[idx[o]].mean(0) for o in model.odors]).astype(np.float32)}
     xml = next((raw / r.name / "Experiment.xml" for r in recs if raw and (raw / r.name / "Experiment.xml").is_file()), None)
     if spacing is not None:

@@ -128,6 +128,33 @@ def _mask_args(g, fit: bool) -> None:
                    + (model % o.join_corr if model else ""))
 
 
+def _clean_args(g, fit: bool) -> None:
+    """The steps that clean Cellpose's ROIs of their neighbours (`alseg.clean`), and the splitting of masks
+    over two glomeruli: options of a model fit (saved with it), or of a prediction (default: the model's)."""
+    from .clean import STEPS
+
+    g.add_argument("--clean", nargs="*", choices=list(STEPS), default=[] if fit else None, metavar="STEP",
+                   help=f"clean Cellpose's ROIs by these steps (of {', '.join(STEPS)}; applied in that order), and "
+                        "make those the final ROIs: trim cuts an ROI's edge back where it carries a neighbouring "
+                        "ROI's tuning, margin keeps ROIs a distance apart, core keeps the pixels Cellpose is surer "
+                        "of. Each step alone is written too (<fly>_clean_<step>.tif)"
+                        + ("" if fit else ". Default: the model's; --clean alone: none"))
+    g.add_argument("--split", action=argparse.BooleanOptionalAction, default=False if fit else None,
+                   help="split a plane's masks that hold two glomeruli tuned differently, before the planes' are joined"
+                        + ("" if fit else ". Default: the model's"))
+
+
+def _set_clean(o, a) -> None:
+    if a.clean is not None:
+        o.clean = list(a.clean)
+        if o.clean:
+            o.final = "clean"
+        elif o.final == "clean":
+            o.final = "pred"
+    if a.split is not None:
+        o.split = a.split
+
+
 def _max_cost_arg(g, fit: bool) -> None:
     """The most a name may cost: an option of a model fit (saved with it), or of a prediction."""
     d = Options().max_cost
@@ -200,6 +227,7 @@ def _parser() -> argparse.ArgumentParser:
                         "final ones): Cellpose's own, named (pred); or refined by odor tuning and the atlas "
                         "(refined: on real flies, this shrank and broke up Cellpose's ROIs)")
     _max_cost_arg(g, fit=True)
+    _clean_args(g, fit=True)
     g.add_argument("--w-prior", type=float, default=0.5, metavar="W",
                    help="weight of the atlas prior relative to odor tuning in refinement. Higher "
                         "lets the atlas overrule tuning more; on synthetic data >= 1 shrinks or "
@@ -281,6 +309,7 @@ def fit_main(argv=None):
                     tentative=not a.no_tentative, gpu=False if a.cpu else None, segmenter=a.segmenter, final=a.final,
                     max_cost=a.max_cost,
                     **{k: getattr(a, k) for k in MASK_OPTIONS})
+        _set_clean(o, a)
         model = fit(flies, a.val, o, out=a.out, odors=data["odors"], aliases=data["aliases"], glomeruli=data["glomeruli"],
                     weights=a.model if a.skip_train else None)
         model.save(a.out / "model")
@@ -339,6 +368,7 @@ def predict_main(argv=None):
     ap.add_argument("--cpu", action="store_true", help="run Cellpose on the CPU (slower) even if there is a GPU")
     _mask_args(ap, fit=False)
     _max_cost_arg(ap, fit=False)
+    _clean_args(ap, fit=False)
     a = ap.parse_args(argv)
     if not (a.model / "model.json").is_file():
         ap.error(f"{a.model} is not a model's folder (no model.json)")
@@ -354,6 +384,7 @@ def predict_main(argv=None):
             setattr(model.options, k, getattr(a, k))
     if a.max_cost is not None:
         model.options.max_cost = a.max_cost
+    _set_clean(model.options, a)
     if a.export:
         data = olfdb.load_export(a.export, tentative=model.options.tentative)
         flies = [f for f in data["flies"] if not a.flies or f["name"] in a.flies]

@@ -238,6 +238,7 @@ def predict(
     join_overlap: float = 0.2,
     join_corr: float = 0.7,
     return_cellprob: bool = False,
+    split=None,
 ) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     """Segment a fly. channels: (C, Z, Y, X). Returns (Z, Y, X) labels.
 
@@ -254,6 +255,9 @@ def predict(
     ``return_cellprob``: also return Cellpose's cell probability map ((Z, Y, X) float32, on the
     fly's grid, resampled bilinearly from the model's): logits, as ``cellprob_threshold`` is (its
     masks are of pixels over that), for `alseg.clean_margin.core`.
+
+    ``split``: a function of the planes' masks (each plane's its own) giving them with those over two
+    glomeruli split (`alseg.clean_trim.split`), before they are joined (so only with ``responses``).
 
     Returns:
         the labels, or (labels, cell probability map) with ``return_cellprob``.
@@ -274,6 +278,8 @@ def predict(
         # each plane on its own (no minimum size yet, as when Cellpose stitches: it is of the objects)
         masks, flows, _ = model.eval(stack, z_axis=None, stitch_threshold=0.0, min_size=-1, **kw)
         masks = resize_xy(np.asarray(masks).reshape(stack.shape[:3]).astype(np.int32), native, 0)
+        if split is not None:
+            masks = split(masks)
         masks = join_planes(masks, responses, join_overlap, join_corr)
         masks = utils.fill_holes_and_remove_small_masks(masks, min_size=15)
     if dilate:

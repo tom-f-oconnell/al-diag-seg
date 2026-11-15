@@ -132,6 +132,7 @@ download).
 | `alseg/responses.py` | Per-voxel 24-odor response vectors (from a raw movie + onsets, or precomputed), local-correlation map, a PCA basis shared across flies, and the 3 input channels. |
 | `alseg/metadata.py` | Voxel sizes from ThorImage `Experiment.xml` files, via [hong2p](https://github.com/ejhonglab/hong2p). |
 | `alseg/segment.py` | Builds per-slice training data (eroded ROI cores), fine-tunes Cellpose-SAM, predicts slice by slice and joins the slices' masks into 3D objects (by overlap and odor tuning). Every fly's planes are resampled in-plane (never in z) to one pixel size for the model. |
+| `alseg/clean.py`, `clean_trim.py`, `clean_margin.py`, `evidence.py` | Steps that keep neighbouring glomeruli out of Cellpose's ROIs (`--clean`), only removing pixels, on each plane: `trim` cuts an ROI's edge back, in bands by distance from its neighbour, while the band carries more than a share of the neighbour's core's tuning (by every recording's per-trial dF/F, `trial_dff.tif`: `evidence.py`); `margin` keeps every ROI a distance from the others' outlines (and inside its own); `core` keeps the pixels Cellpose's cell probability is higher at. `--split` splits a plane's masks that hold two glomeruli tuned differently, before the planes' are joined. Each step alone is written and scored too (`<fly>_clean_<step>`), and the steps asked for are the final ROIs (`clean`). |
 | `alseg/refine.py` | Distances (ROI growth, neighbors, minimum size) are in µm, so ROIs don't grow into planes far away. `refine_with_prior`: refinement as energy minimization over voxel labels, with costs for tuning mismatch, `-log` atlas prior and neighbor disagreement (smoothness), solved by ICM. `refine_by_tuning`: the simpler tuning-only version: grows each ROI a little, then keeps only voxels that match its own tuning better than any neighbor's and are bright enough, and drops mixed border voxels. Also computes crosstalk metrics (coherence, neighbor tuning correlation, border leak), and (`purity_report`, `breadth`) how far ROIs keep from each other on a plane, how much of its nearest neighbor's tuning an ROI's edge facing it and its whole carry, and how broadly predicted ROIs respond against the manual ones they match: all in `summary.csv`, for each kind of ROIs and the manual ones. |
 | `alseg/atlas.py` | Probabilistic atlas: registers training flies to a template (ANTsPy, Affine or SyN, in physical space with each fly's voxel size, through its anatomical stack if it has one, mirrored left-right first if that fits better), averages each glomerulus's warped mask into a probability map, and warps the atlas into a new fly. |
 | `alseg/reference.py` | Adds a fixed reference atlas (labels only, e.g. Grabe et al. 2016 or hemibrain) to the training-fly atlas, aligned by its labels; see [below](#fixed-reference-atlases). |
@@ -252,3 +253,22 @@ affine and 0.63 after SyN.
 * **How the planes' masks are joined into 3D objects.** Planes 10 µm apart make a glomerulus' outlines change size and shift from plane to plane, and neighbouring glomeruli overlap between planes. Cellpose's own stitching (each mask to its best match by IoU in the plane before, if ≥ 0.25, so several can join one) joined 93% of the overlapping masks of one glomerulus in adjacent planes, but also 14% of those of two. Instead, masks of adjacent planes are matched one to one, where they overlap by at least a fraction of the smaller one (0.2, `--join-overlap`) and their mean odor tunings correlate (0.7, `--join-corr`): 91% and 10% of those pairs pass. Scored strictly, on 12 flies of the same fit (with the earlier settings above, joined at 0.3 and 0.5) and picked on 11 and scored on the 12th in turn, this found 42% of the manual glomeruli as 3D objects and made 50% right, from Cellpose's 39% and 47%. Scored as partly drawn, on the held-out flies, it found 46%, where joining them perfectly (by the manual ROIs) would find 48%. `--join cellpose` joins as Cellpose does.
 * **Voxel sizes.** Check the per-fly voxel sizes `run_pipeline.py` prints. Refinement distances (`grow_um`, `min_size_um3`) are in µm, so they carry over between flies with different resolutions.
 * **Run-to-run differences.** ANTs registration uses all cores by default, which makes it differ slightly between runs, so close calls (whether a stack gets mirrored, which glomeruli a `--ref` fit leaves out) can change. `--deterministic` makes registration repeatable (a fixed seed and one thread): two runs of `python smoke_test.py --deterministic` wrote identical files, but took 2.4× as long (~230 s vs. 98 s).
+
+### Keeping neighbouring glomeruli out of ROIs
+
+On the 4 held-out flies of the database's fit 7 (in-plane masks, on the diagnostic recordings' trial-mean dF/F; the steps on
+the fit's own ROIs, at their defaults; `summary.csv`'s scores, means over the flies):
+
+| ROIs | gap to the nearest ROI (um) | touching | a neighbour's share of the edge facing it | of the whole ROI | area kept |
+|---|---|---|---|---|---|
+| manual | 2.0 | 0% | 0.14 | 0.03 | |
+| Cellpose's | 0.5 | 48% | 0.30 | 0.04 | 100% |
+| `trim` | 2.1 | 2% | 0.07 | 0.01 | 89% |
+| `margin` | 2.0 | 0% | 0.13 | 0.01 | 93% |
+| `core` | 3.0 | 10% | 0.10 | 0.00 | 68% |
+| `trim` then `margin` | 2.2 | 0% | 0.07 | 0.01 | 88% |
+
+No ROI is lost by any step. `trim`'s share is measured on data its evidence includes (the diagnostic trials): with evidence of the
+other recordings alone it is 0.14. `margin` is purer than `core` at equal area kept (cell probability stays high between touching
+masks). `--split` splits 4 of the 11 masks holding at least 40% of two manual ROIs, and 12 of the 266 holding one (mostly cutting
+off parts where nothing is drawn); the other 7 are tuned too alike to tell from one glomerulus.
