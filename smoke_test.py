@@ -218,3 +218,22 @@ assert partly["tp"] == 1 and partly["n_scored"] == 1 and abs(partly["dice_per_gt
 two = metrics.match_report_2d(gt, pred, partly_drawn=True)
 assert (two["tp"], two["n_pred"], two["n_scored"]) == (1, 5, 1), two
 print("ROIs drawn on some planes only scored as such")
+
+# how far ROIs keep from each other, and how much of a neighbour they carry (`refine.purity_report`,
+# `refine.breadth`): two glomeruli side by side, each with an odor of its own; ROIs that keep 3 px apart
+# are their own to the edge, ROIs that meet in the middle carry their neighbour at the edge facing it
+from scipy import ndimage as ndi  # noqa: E402
+from alseg import refine  # noqa: E402
+
+truth = np.zeros((1, 40, 60), int)
+truth[0, 8:32, 6:28], truth[0, 8:32, 31:54] = 1, 2
+resp = np.stack([ndi.gaussian_filter((truth[0] == l).astype(float), 2.0) for l in (1, 2)] + [np.zeros((40, 60))])[:, None]
+met = truth.copy()
+met[0, 8:32, 28:30], met[0, 8:32, 30:31] = 1, 2
+apart, touching = (refine.purity_report(resp, l, (10.0, 0.5, 0.5)) for l in (truth, met))
+assert apart["n"] == 2 and np.allclose(apart["gap_um"], 1.5) and np.allclose(touching["gap_um"], 0.0), (apart, touching)
+assert len(touching["edge_share"]) == 2 and min(touching["edge_share"]) > 2 * max(apart["edge_share"]) > 0, (apart, touching)
+assert max(touching["whole_share"]) < min(touching["edge_share"]), touching
+wide = refine.breadth(resp, truth, np.where(ndi.binary_dilation(truth[0] == 1, iterations=4), 1, 0)[None], threshold=0.5)
+assert wide["n"] == 3 and wide["pred"] == wide["manual"] == 1 / 3, wide
+print("ROIs' gaps and their neighbours' share of their edges measured")

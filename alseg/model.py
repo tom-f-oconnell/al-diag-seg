@@ -133,6 +133,16 @@ def write_identity_terms(path, terms: dict) -> None:
     Path(path).write_text(json.dumps(clean(terms), indent=1))
 
 
+def _purity(responses, labels, spacing) -> dict:
+    """`refine.purity_report` as a row's columns: medians of ``gap_um``, ``edge_share`` and
+    ``whole_share``, and ``touching``, the fraction of in-plane masks touching another ROI ('' where
+    there is none to take them of)."""
+    r = refine.purity_report(responses, labels, spacing)
+    med = lambda v: float(np.median(v)) if len(v) else ""  # noqa: E731
+    return {"gap_um": med(r["gap_um"]), "touching": float(np.mean(np.array(r["gap_um"]) <= 0)) if r["gap_um"] else "",
+            "edge_share": med(r["edge_share"]), "whole_share": med(r["whole_share"])}
+
+
 def _stand_in(fly) -> np.ndarray:
     from skimage.segmentation import expand_labels
 
@@ -265,8 +275,11 @@ class Model:
         Returns:
             dict with ``summary`` (a row per fly and kind of ROIs: recall, precision and
             mean Dice of matched ROIs, as 3D objects and (``*_2d``) plane by plane
-            (`metrics.match_report_2d`), splits, merges, crosstalk; and of its manual ROIs,
-            their crosstalk, to compare with), ``identity`` (per fly and
+            (`metrics.match_report_2d`), splits, merges, crosstalk, how far its in-plane masks
+            keep from each other and how much of a neighbour they carry (`_purity`), and how
+            broadly those matching a manual one respond against it (``breadth``,
+            ``breadth_manual``: `refine.breadth`); and of its manual ROIs, their crosstalk and
+            purity, to compare with), ``identity`` (per fly and
             kind: ROIs named as the manual one they overlap, of those that overlap one),
             ``glomeruli`` (per glomerulus, over the flies: how many have it, in how many
             the final ROIs detect it, mean Dice, named right), ``final`` and ``scoring``.
@@ -296,7 +309,8 @@ class Model:
                          "recall_2d": "", "precision_2d": "", "dice_2d": "",
                          "coherence": np.mean(list(ct["coherence"].values())) if ct["coherence"] else "",
                          "neighbor_corr": np.mean(list(ct["neighbor_corr"].values())) if ct["neighbor_corr"] else "",
-                         "leak": np.mean(np.abs(list(ct["leak"].values()))) if ct["leak"] else ""})
+                         "leak": np.mean(np.abs(list(ct["leak"].values()))) if ct["leak"] else "",
+                         **_purity(f["responses"], f["labels"], f["spacing"]), "breadth": "", "breadth_manual": ""})
             for kind, lab in p["labels"].items():
                 names = {l: v[0] for l, v in p["identities"][kind].items()}
                 if out:
@@ -316,7 +330,11 @@ class Model:
                     "coherence": np.mean(list(ct["coherence"].values())) if ct["coherence"] else "",
                     "neighbor_corr": np.mean(list(ct["neighbor_corr"].values())) if ct["neighbor_corr"] else "",
                     "leak": np.mean(np.abs(list(ct["leak"].values()))) if ct["leak"] else "",
+                    **_purity(f["responses"], lab, f["spacing"]),
                 })
+                br = refine.breadth(f["responses"], f["labels"], lab)
+                rows[-1].update(breadth="" if br["pred"] is None else br["pred"],
+                                breadth_manual="" if br["manual"] is None else br["manual"])
                 if partly_drawn:
                     iou, g_ids, p_ids, _ = metrics.iou_matrix_partly_drawn(f["labels"], lab)
                 else:

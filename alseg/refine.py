@@ -276,3 +276,87 @@ def crosstalk_report(responses: np.ndarray, labels: np.ndarray, spacing=(1.0, 1.
             coef, *_ = np.linalg.lstsq(X, ya, rcond=None)
             leak[(a, b)] = float(coef[1] / (abs(coef[0]) + abs(coef[1]) + 1e-8))
     return {"coherence": coherence, "neighbor_corr": neighbor_corr, "leak": leak}
+
+
+def _px(um: float, spacing) -> int:
+    return max(1, int(round(um / spacing[1])))
+
+
+def _share(v, own, other) -> float:
+    """The weight of ``other`` in ``v = a own + b other`` (a, b >= 0, over odors): b / (a + b)."""
+    from scipy.optimize import nnls
+
+    (a, b), _ = nnls(np.stack([own, other], 1).astype(np.float64), np.asarray(v, np.float64))
+    return float(b / (a + b)) if a + b > 0 else float("nan")
+
+
+def purity_report(responses: np.ndarray, labels: np.ndarray, spacing=(1.0, 1.0, 1.0), core_um: float = 1.5,
+                  reach_um: float = 2.0, ring_um: float = 1.0, facing_um: float = 3.0, min_core: int = 8) -> dict:
+    """How far ROIs keep from each other in-plane, and how much of a neighbour their edges carry.
+
+    Per in-plane mask (an ROI on one plane):
+
+    gap_um      distance to the nearest other ROI on its plane (0: touching), of masks with one.
+    edge_share  of masks with a core (the pixels ``core_um`` from its edge, ``min_core`` at least)
+                and a neighbour with one within ``reach_um`` (the one most in reach): the weight of
+                the neighbour's core's tuning in that of the mask's edge facing it (its outer
+                ``ring_um``, within ``facing_um`` of the neighbour), as a sum of its own core's
+                and the neighbour's (both weights >= 0): b / (a + b). 0: the edge is the ROI's own.
+    whole_share the same of the whole mask's mean tuning: what reaches its signal.
+
+    Returns:
+        dict with those as lists (a value per mask that has one), and ``n``, the masks.
+    """
+    core_px, reach, ring, facing_px = (_px(u, spacing) for u in (core_um, reach_um, ring_um, facing_um))
+    gap, edge, whole, n = [], [], [], 0
+    for z in range(labels.shape[0]):
+        L = labels[z]
+        masks = {int(l): L == l for l in np.unique(L) if l}
+        n += len(masks)
+        cores = {}
+        for l, m in masks.items():
+            c = ndi.binary_erosion(m, iterations=core_px)
+            if c.sum() >= min_core:
+                cores[l] = responses[:, z][:, c].mean(1)
+        for l, m in masks.items():
+            others = (L > 0) & ~m
+            if not others.any():
+                continue
+            gap.append(float((ndi.distance_transform_edt(~others)[m].min() - 1) * spacing[1]))
+            if l not in cores:
+                continue
+            halo = ndi.binary_dilation(m, iterations=reach) & ~m
+            ls, k = np.unique(L[halo], return_counts=True)
+            near = [(c, int(x)) for x, c in zip(ls, k) if int(x) in cores]
+            if not near:
+                continue
+            nb = max(near)[1]
+            f = m & ~ndi.binary_erosion(m, iterations=ring) & (ndi.distance_transform_edt(~masks[nb]) <= facing_px)
+            whole.append(_share(responses[:, z][:, m].mean(1), cores[l], cores[nb]))
+            if f.sum() >= 4:
+                edge.append(_share(responses[:, z][:, f].mean(1), cores[l], cores[nb]))
+    clean = lambda v: [x for x in v if np.isfinite(x)]  # noqa: E731
+    return {"gap_um": gap, "edge_share": clean(edge), "whole_share": clean(whole), "n": n}
+
+
+def breadth(responses: np.ndarray, gt: np.ndarray, pred: np.ndarray, threshold: float = 0.3, min_iou: float = 0.5) -> dict:
+    """How broadly predicted ROIs respond against the manual ones they match: over the in-plane
+    masks of ``pred`` matched to one of ``gt`` (IoU >= ``min_iou``), the fraction of mask-odor
+    pairs whose mean response is over ``threshold`` (dF/F), predicted (``pred``) and manual
+    (``manual``), and the pairs counted (``n``). Higher predicted than manual: broader tuning."""
+    p, g = [], []
+    for z in range(pred.shape[0]):
+        for l in np.unique(pred[z]):
+            if not l:
+                continue
+            m = pred[z] == l
+            ms, k = np.unique(gt[z][m], return_counts=True)
+            for q, c in zip(ms, k):
+                gm = gt[z] == q
+                if q and c / (m | gm).sum() >= min_iou:
+                    p.append(responses[:, z][:, m].mean(1))
+                    g.append(responses[:, z][:, gm].mean(1))
+    if not p:
+        return {"pred": None, "manual": None, "n": 0}
+    p, g = np.concatenate(p), np.concatenate(g)
+    return {"pred": float((p > threshold).mean()), "manual": float((g > threshold).mean()), "n": int(p.size)}
