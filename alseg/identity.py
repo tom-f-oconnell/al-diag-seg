@@ -115,6 +115,7 @@ def assign_identities(
     unknown_cost: float = 0.5,
     return_terms: bool = False,
     n_best: int = 5,
+    fixed: dict | None = None,
 ):
     """Match predicted ROIs to template glomeruli.
 
@@ -127,6 +128,11 @@ def assign_identities(
     The total cost is divided by the sum of the active weights, so it is on
     the same scale whichever terms are on; pairs with cost > ``max_cost``
     are left unassigned instead of forced.
+
+    fixed : optional {label: name or None}: ROIs whose names are given (None:
+        left unnamed). They keep them whatever they cost, no other ROI gets
+        one of them, and the others' layout term is of their offsets to them
+        too: for naming ROIs added to ones already named (`alseg.nmf`).
 
     Returns {label: (name or None, cost, confidence)}; confidence is the gap
     between the best and second-best glomerulus for that ROI. With
@@ -192,10 +198,17 @@ def assign_identities(
     w_layout = w_layout / active
 
     nb = neighbors(labels, spacing=sp)
-    assign = _solve(base, max_cost)
+    forced = None
+    if fixed:
+        col = {n: j for j, n in enumerate(names)}
+        # (a name no glomerulus here has is kept too, below: to the matching it is an ROI left unnamed)
+        forced = np.array([col.get(fixed[l], -1) if l in fixed else -2 for l in labs])
+        for j in set(forced[forced >= 0].tolist()):  # (a name given to two ROIs: the first one's, to the matching)
+            forced[np.flatnonzero(forced == j)[1:]] = -1
+    assign = _solve(base, max_cost, forced)
     for _ in range(n_layout_iter if w_layout else 0):
         layout = _layout_cost(labs, nb, roi_pos, exp_pos, pos_sd, assign)
-        new = _solve(base + w_layout * layout, max_cost)
+        new = _solve(base + w_layout * layout, max_cost, forced)
         if np.array_equal(new, assign):
             break
         assign = new
@@ -209,6 +222,8 @@ def assign_identities(
         conf = float(srt[1] - srt[0]) if nN > 1 else np.inf
         j = assign[i]
         out[l] = (names[j] if j >= 0 else None, float(cost[i, j]) if j >= 0 else max_cost, conf)
+        if fixed and l in fixed and j < 0:
+            out[l] = (fixed[l], max_cost, conf)
     if not return_terms:
         return out
     taken = {int(j): labs[i] for i, j in enumerate(assign) if j >= 0}
@@ -226,10 +241,20 @@ def assign_identities(
                  "rois": rois}
 
 
-def _solve(cost, max_cost):
-    """Hungarian with a dummy "unassigned" option per ROI. Returns assignment per row (-1 = none)."""
+def _solve(cost, max_cost, forced=None):
+    """Hungarian with a dummy "unassigned" option per ROI. Returns assignment per row (-1 = none).
+    ``forced``: per row, the column it is given whatever it costs (-1: none; -2: not forced)."""
     nL, nN = cost.shape
     padded = np.hstack([cost, np.full((nL, nL), max_cost)])
+    if forced is not None:
+        big = 1e6
+        for i, j in enumerate(forced):
+            if j >= 0:
+                padded[:, j] = big
+                padded[i] = big
+                padded[i, j] = -big
+            elif j == -1:
+                padded[i, :nN] = big
     rows, cols = linear_sum_assignment(padded)
     a = np.full(nL, -1)
     for i, j in zip(rows, cols):

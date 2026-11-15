@@ -98,8 +98,13 @@ again to join planes into 3D ROIs and, with the template and atlas, to name them
 
 ### Never read
 
-The movies themselves (apart from that mean), per-trial `trial_dff.tif`, non-diagnostic
-recordings such as megamat, and the 4–5 odors per fly outside the common 20.
+By a fit, or a prediction as the model makes it: the movies themselves (apart from that
+mean), per-trial `trial_dff.tif`, non-diagnostic recordings such as megamat, and the 4–5
+odors per fly outside the common 20. What is run on a prediction's ROIs afterwards reads
+more, of every recording on the fly's grid: the cleaning steps `trim` and `--split`, each
+recording's `trial_dff.tif`; and the look for glomeruli the ROIs miss (`alseg.nmf`,
+[below](#glomeruli-the-rois-miss)), each recording's `mocorr.tif` (every time point of every
+trial).
 
 ## Running a model on your flies
 
@@ -133,6 +138,7 @@ download).
 | `alseg/metadata.py` | Voxel sizes from ThorImage `Experiment.xml` files, via [hong2p](https://github.com/ejhonglab/hong2p). |
 | `alseg/segment.py` | Builds per-slice training data (eroded ROI cores), fine-tunes Cellpose-SAM, predicts slice by slice and joins the slices' masks into 3D objects (by overlap and odor tuning). Every fly's planes are resampled in-plane (never in z) to one pixel size for the model. |
 | `alseg/clean.py`, `clean_trim.py`, `clean_margin.py`, `evidence.py` | Steps that keep neighbouring glomeruli out of Cellpose's ROIs (`--clean`), only removing pixels, on each plane: `trim` cuts an ROI's edge back, in bands by distance from its neighbour, while the band carries more than a share of the neighbour's core's tuning (by every recording's per-trial dF/F, `trial_dff.tif`: `evidence.py`); `margin` keeps every ROI a distance from the others' outlines (and inside its own); `core` keeps the pixels Cellpose's cell probability is higher at. `--split` splits a plane's masks that hold two glomeruli tuned differently, before the planes' are joined. Each step alone is written and scored too (`<fly>_clean_<step>`), and the steps asked for are the final ROIs (`clean`). |
+| `alseg/nmf.py` | Looks in a fly's movies for glomeruli its ROIs miss (`find`; [below](#glomeruli-the-rois-miss)): each plane's movie factorized (non-negative, on the GPU if there is one) as a footprint per ROI and free ones for what those leave unexplained, a free one's place a candidate if it is round enough, in the lobe, responds reliably and not as a mixture of its neighbours; joined across planes, and to the ROI it is more of. `check` also cleans the candidates as the ROIs were and names them, with the ROIs' names kept or all named again together (`identity.assign_identities`'s `fixed`). |
 | `alseg/refine.py` | Distances (ROI growth, neighbors, minimum size) are in µm, so ROIs don't grow into planes far away. `refine_with_prior`: refinement as energy minimization over voxel labels, with costs for tuning mismatch, `-log` atlas prior and neighbor disagreement (smoothness), solved by ICM. `refine_by_tuning`: the simpler tuning-only version: grows each ROI a little, then keeps only voxels that match its own tuning better than any neighbor's and are bright enough, and drops mixed border voxels. Also computes crosstalk metrics (coherence, neighbor tuning correlation, border leak), and (`purity_report`, `breadth`) how far ROIs keep from each other on a plane, how much of its nearest neighbor's tuning an ROI's edge facing it and its whole carry, and how broadly predicted ROIs respond against the manual ones they match: all in `summary.csv`, for each kind of ROIs and the manual ones. |
 | `alseg/atlas.py` | Probabilistic atlas: registers training flies to a template (ANTsPy, Affine or SyN, in physical space with each fly's voxel size, through its anatomical stack if it has one, mirrored left-right first if that fits better), averages each glomerulus's warped mask into a probability map, and warps the atlas into a new fly. |
 | `alseg/reference.py` | Adds a fixed reference atlas (labels only, e.g. Grabe et al. 2016 or hemibrain) to the training-fly atlas, aligned by its labels; see [below](#fixed-reference-atlases). |
@@ -272,3 +278,25 @@ No ROI is lost by any step. `trim`'s share is measured on data its evidence incl
 other recordings alone it is 0.14. `margin` is purer than `core` at equal area kept (cell probability stays high between touching
 masks). `--split` splits 4 of the 11 masks holding at least 40% of two manual ROIs, and 12 of the 266 holding one (mostly cutting
 off parts where nothing is drawn); the other 7 are tuned too alike to tell from one glomerulus.
+
+### Glomeruli the ROIs miss
+
+Cellpose outlines what it sees in a fly's average image and its odors' mean responses, and on the database's held-out flies its
+ROIs match a little over half of the manual in-plane outlines (IoU ≥ 0.5). `alseg.nmf.find(labels, fly)` looks in the fly's
+movies (`mocorr.tif` of every recording: each trial's time points less its baseline) for the rest, and returns candidates to
+review, never ROIs to use as they are (the module's docstring says how; `alseg.nmf.check(model, fly, labels, names, prior)` also
+cleans and names them). On the 4 held-out flies of the database's fit 7 (36 planes, 325 manual in-plane outlines, of which the
+ROIs match 183 and leave 57 at IoU < 0.2), at its defaults:
+
+| candidates | how many | on a manual outline the ROIs did not match (IoU ≥ 0.3 with it) | where none is drawn |
+|---|---|---|---|
+| glomeruli added (ROIs of their own) | 9 | 2 | 7 |
+| more of an ROI, on a plane it had no outline on | 16 | 6 | 10 |
+| parts cut off ROIs (`clean_trim.split`'s test) | 27 | 4 of masks over two manual outlines | 23 |
+
+Where a "more of an ROI" candidate and the ROI it is more of (on the plane next to it) both lie on manual outlines (5 of the 16),
+those are of the same glomerulus in all 5. Where nothing is drawn a candidate is not known to be wrong (outlines are drawn on some of a glomerulus'
+planes, and not of every glomerulus). The tests matter more than the factorization: without them it gives 901 places, 30 on such
+an outline, most of them the light round the lobe and between ROIs; and a factorization of each mask's own pixels in two did not
+tell masks over two glomeruli from masks over one (parts for 5 of the 11, 2 of them right, and for 159 others), so masks are cut
+by the per-trial test `--split` uses. It takes 14 to 22 s a fly on a GPU (RTX 3090), after the movies are read.

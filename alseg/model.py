@@ -140,6 +140,14 @@ def write_identity_terms(path, terms: dict) -> None:
     Path(path).write_text(json.dumps(clean(terms), indent=1))
 
 
+def write_prior(path, prior: np.ndarray, names) -> None:
+    """A model's atlas on a fly's grid (`atlas.atlas_to_fly`: (glomeruli, Z, Y, X), each one's
+    probability), with the glomeruli's ``names``, as a compressed .npz (``prior``, float16, and
+    ``names``): what a fly's ROIs are named by, kept so that ROIs added later (`alseg.nmf`) are named
+    without registering the atlas again."""
+    np.savez_compressed(path, prior=np.asarray(prior, np.float16), names=np.array(list(names)))
+
+
 def _purity(responses, labels, spacing, ref=None) -> dict:
     """`refine.purity_report` as a row's columns: medians of ``gap_um``, ``edge_share`` and
     ``whole_share``, and ``touching``, the fraction of in-plane masks touching another ROI ('' where
@@ -198,7 +206,9 @@ class Model:
         return folder
 
     @classmethod
-    def load(cls, folder) -> "Model":
+    def load(cls, folder, atlas: bool = True) -> "Model":
+        """The model saved in ``folder``; without its atlas (which is most of what there is to read) if
+        not ``atlas``: enough to name ROIs with an atlas already on a fly's grid (`alseg.nmf.name`)."""
         folder = Path(folder)
         m = json.loads((folder / "model.json").read_text())
         if m.get("format") != FORMAT:
@@ -209,7 +219,7 @@ class Model:
         tmpl = {n: {k: (np.asarray(v) if isinstance(v, list) else v) for k, v in g.items()}
                 for n, g in json.loads((folder / "template.json").read_text()).items()}
         atl = None
-        if m["atlas"]:
+        if m["atlas"] and atlas:
             a = np.load(folder / "atlas.npz")
             atl = atlas_mod.Atlas(a["template"], a["prob"], [str(n) for n in a["names"]], tuple(float(x) for x in a["spacing"]),
                                   a["counts"])
@@ -227,7 +237,9 @@ class Model:
             'refined_prior', with the atlas), ``identities``: for each, {label: (name or
             None, cost, confidence)}, ``identity_terms``: for each, what those costs are
             made of (`identity.assign_identities`), ``final``: the kind to use,
-            ``atlas_maxprob``: the atlas on the fly's grid (its largest probability), or None.
+            ``atlas_maxprob``: the atlas on the fly's grid (its largest probability), or None,
+            and ``prior``: the atlas there, each glomerulus' probability ((glomeruli, Z, Y, X), in
+            the order of the atlas' names), or None.
         """
         o, resp, sp = self.options, fly["responses"], fly["spacing"]
         if self.segmenter == "stand-in":
@@ -254,7 +266,7 @@ class Model:
                                                                 max_cost=o.max_cost, return_terms=True, **kw)
 
         name("refined_tuning", w_shape=0, w_layout=0)
-        maxprob = None
+        maxprob = prior = None
         if self.atlas is not None:
             if fly.get("hires") and fly["hires"].get("mirror") is None:
                 atlas_mod.orient_hires(fly, o.hires_reg)
@@ -278,7 +290,7 @@ class Model:
             ids[kind] = {l: v for l, v in ids["pred"].items() if l in left}
             terms[kind] = terms["pred"]
         return {"labels": labels, "identities": ids, "identity_terms": terms, "atlas_maxprob": maxprob,
-                "final": self.final_kind()}
+                "prior": prior, "final": self.final_kind()}
 
     def final_kind(self) -> str:
         """The kind of ROIs a fly's are (`Options.final`): 'pred' (Cellpose's), 'clean' (Cellpose's after
@@ -290,14 +302,15 @@ class Model:
             return clean.KIND
         return "refined_prior" if self.atlas is not None else "refined_tuning"
 
-    def evaluate(self, flies, out=None, progress=None, partly_drawn: bool = True) -> dict:
+    def evaluate(self, flies, out=None, progress=None, partly_drawn: bool = True, priors: bool = False) -> dict:
         """Predicts each fly (with ROIs) and scores each kind of predicted ROIs against its own.
 
         Writes to ``out`` (if given), per fly: each kind's labels (``<fly>_<kind>.tif``) and
         RoiSet.zip, named (``<fly>_<kind>_RoiSet.zip``), its identities
         (``<fly>_identities_<kind>.csv``) and what their costs are made of
-        (``<fly>_identity_terms_<kind>.json``), the atlas on its grid; and ``summary.csv``,
-        ``glomeruli.csv``.
+        (``<fly>_identity_terms_<kind>.json``), the atlas on its grid (its largest probability;
+        with ``priors``, each glomerulus' too: ``<fly>_atlas_prior.npz``, `write_prior`); and
+        ``summary.csv``, ``glomeruli.csv``.
 
         Returns:
             dict with ``summary`` (a row per fly and kind of ROIs: recall, precision and
@@ -329,6 +342,8 @@ class Model:
             if out:
                 if p["atlas_maxprob"] is not None:
                     write_volume(out / f"{f['name']}_atlas_maxprob.tif", p["atlas_maxprob"])
+                    if priors:
+                        write_prior(out / f"{f['name']}_atlas_prior.npz", p["prior"], self.atlas.names)
             ct = refine.crosstalk_report(f["responses"], f["labels"], f["spacing"])
             rows.append({"fly": f["name"], "rois": "manual", "n": len(np.unique(f["labels"])) - 1, "recall": "", "precision": "",
                          "dice": "", "splits": "", "merges": "", "n_scored": "",

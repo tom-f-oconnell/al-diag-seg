@@ -12,11 +12,14 @@ folder (``<analysis>/<date>/<fly>/<recording>/``):
   pixel from 5-6 recordings (the trial means the model reads: 20), 145-250 MB per fly, read in
   5-10 s (0.3-2 s when cached).
 
-There is no kind of the movies (``mocorr.tif``) yet: with trials, `alseg.clean_trim.trim` already
-cleans edges as well as the manual ROIs are, even on evidence of the non-diagnostic recordings alone.
+The cleaning steps do not read the movies: with trials, `alseg.clean_trim.trim` already cleans edges
+as well as the manual ROIs are, even on evidence of the non-diagnostic recordings alone. `frames`
+reads them, for `alseg.nmf` (which looks for glomeruli the ROIs miss): every time point of every
+trial, 840-2,460 per pixel on those flies, 0.6-1.4 GB per fly as it keeps them.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +27,7 @@ import tifffile
 
 TRIAL_DFF = "trial_dff.tif"
 TRIALS = "trial_frames_and_odors.json"
+MOVIE = "mocorr.tif"  # a recording's motion-corrected movie, (T, Z, Y, X), as al_analysis leaves it
 KINDS = ("trials",)
 
 
@@ -74,3 +78,67 @@ def load(mocorr_dir, shape_zyx, kind: str = "trials", names=None, exclude=(), cl
         x[~np.isfinite(x)] = 0
         out.append(np.clip(x, -clip, clip, out=x))
     return np.concatenate(out)
+
+
+def _movie(path: Path, shape_zyx):
+    """A recording's movie as (T, Z, Y, X), read as it is asked for where the file allows (else read whole);
+    None if it is on another grid. Its planes are a dimension of their own (as ImageJ hyperstacks have
+    them, and al_analysis writes them); pages that do not say what they are, are taken as time points'
+    planes in turn."""
+    with tifffile.TiffFile(path) as t:
+        series = t.series[0]
+        shape, axes, mapped = tuple(series.shape), series.axes, series.dataoffset is not None
+    zyx = tuple(shape_zyx)
+    if len(shape) == 4:
+        ok = shape[1:] == zyx
+    else:
+        ok = len(shape) == 3 and shape[1:] == zyx[1:] and (zyx[0] == 1 or (axes[0] not in "TZC" and shape[0] % zyx[0] == 0))
+    if not ok:
+        return None
+    m = tifffile.memmap(path, mode="r") if mapped else tifffile.imread(path)
+    return m.reshape((-1,) + zyx)
+
+
+def frames(mocorr_dir, shape_zyx, names=None, exclude=(), progress=None) -> dict:
+    """A fly's motion-corrected movies as evidence, time point by time point: of every recording on its
+    grid with a movie (`MOVIE`) and trials (`TRIALS`), every time point of every trial less the mean of
+    the trial's time points before its odor (dF, in the movie's units, not over F: light adds).
+
+    Args:
+        mocorr_dir: its motion-corrected data folder (as `alseg.fly.load_fly` takes).
+        shape_zyx: its grid, (Z, Y, X).
+        names: only the recordings of these folder names (default every one on the grid).
+        exclude: recordings (folder names) left out.
+        progress: called as ``progress(done, total)`` (recordings read).
+
+    Returns:
+        dict with ``dff``: (n, Z, Y, X) float16, n time points in all (e.g. 2,460 of 5 recordings);
+        ``trial``: (n,) the trial each is of (an index into ``trials``); ``on``: (n,) whether the
+        odor is on (from the trial's first time point with it); ``trials``: of each trial, the
+        (recording, odor) it is of, its odor as recorded; and ``recordings``: the folders read.
+
+    Raises:
+        ValueError: if no recording has a movie and trials on the grid.
+    """
+    recs = [r for r in sorted(p for p in Path(mocorr_dir).iterdir() if p.is_dir())
+            if (r / MOVIE).is_file() and (r / TRIALS).is_file() and (names is None or r.name in names) and r.name not in exclude]
+    dff, trial, on, trials, read = [], [], [], [], []
+    for i, r in enumerate(recs):
+        movie = _movie(r / MOVIE, shape_zyx)
+        if movie is not None:
+            for t in json.loads((r / TRIALS).read_text(encoding="utf-8")):
+                start, onset, end = int(t["start_frame"]), int(t["first_odor_frame"]), min(int(t["end_frame"]), len(movie) - 1)
+                if onset <= start or end < onset:
+                    continue
+                v = np.asarray(movie[start:end + 1], np.float32)
+                v -= v[:onset - start].mean(0)
+                dff.append(v.astype(np.float16))
+                trial += [len(trials)] * len(v)
+                on += [False] * (onset - start) + [True] * (end + 1 - onset)
+                trials.append((r.name, str(t.get("odors"))))
+            read.append(r.name)
+        if progress:
+            progress(i + 1, len(recs))
+    if not dff:
+        raise ValueError(f"{mocorr_dir}: no recording with {MOVIE} and {TRIALS} of planes ({', '.join(map(str, shape_zyx))})")
+    return {"dff": np.concatenate(dff), "trial": np.array(trial), "on": np.array(on), "trials": trials, "recordings": read}

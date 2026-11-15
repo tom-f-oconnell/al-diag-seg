@@ -52,7 +52,8 @@ def _average(d: Path) -> np.ndarray:
     raise FileNotFoundError(f"{d}: no {CONCAT_AVG} or {CONCAT} (its average image)")
 
 
-def load_fly(mocorr_dir, model, raw_dir=None, spacing=None, name=None, glomeruli=None, tentative: bool = True) -> dict:
+def load_fly(mocorr_dir, model, raw_dir=None, spacing=None, name=None, glomeruli=None, tentative: bool = True,
+             stack: bool = True) -> dict:
     """A fly (as `olfdb.load` gives them) with its responses in ``model``'s odors and order.
 
     Args:
@@ -62,6 +63,8 @@ def load_fly(mocorr_dir, model, raw_dir=None, spacing=None, name=None, glomeruli
         spacing: (z, y, x) voxel size in um, if not from an ``Experiment.xml``.
         glomeruli: names the database accepts (its ROIs are scored as glomeruli by them);
             default the model's.
+        stack: whether its anatomical stack is read (for the atlas: not needed where the atlas
+            is on the fly's grid already).
 
     Raises:
         ValueError: if it lacks some of the model's odors (listed), or has no voxel size.
@@ -104,11 +107,11 @@ def load_fly(mocorr_dir, model, raw_dir=None, spacing=None, name=None, glomeruli
         f["spacing"] = metadata.thorimage_spacing(xml, avg.shape)
     else:
         raise ValueError(f"{d}: no voxel size: give the raw data folder (an Experiment.xml of its recordings) or the spacing")
-    stack = next((s for s in sorted(raw.iterdir()) if s.is_dir() and ANATOMICAL.fullmatch(s.name)
-                  and (s / "Experiment.xml").is_file()), None) if raw else None
-    if stack is not None and model.atlas is not None:
-        h = olfdb.read_stack(stack)
-        f["hires"] = {"anatomy": h, "spacing": metadata.thorimage_spacing(stack / "Experiment.xml", h.shape), "mirror": None}
+    anat = next((s for s in sorted(raw.iterdir()) if s.is_dir() and ANATOMICAL.fullmatch(s.name)
+                 and (s / "Experiment.xml").is_file()), None) if raw and stack else None
+    if anat is not None and model.atlas is not None:
+        h = olfdb.read_stack(anat)
+        f["hires"] = {"anatomy": h, "spacing": metadata.thorimage_spacing(anat / "Experiment.xml", h.shape), "mirror": None}
     roiset = d / ROISET if (d / ROISET).is_file() else next((r / ROISET for r in recs if (r / ROISET).is_file()), None)
     if roiset is not None:
         names = set(glomeruli or model.info.get("accepted_glomeruli") or model.glomeruli)
