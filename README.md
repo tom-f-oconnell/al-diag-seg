@@ -121,6 +121,8 @@ fits: none costing `--max-cost` or less, 0.6 unless the model was fit with anoth
 plane, as ImageJ and al_analysis read them; `<fly>_identity_terms.json` has what each name
 cost (each term's value for the ROI's 5 best glomeruli, and the weights). Its odors are matched to the
 model's by their names as recorded; it needs all of them (the ones it lacks are listed).
+A fly needs all of the model's odors as it is; [missing_diagnostics.md](missing_diagnostics.md) has what the model
+does with fewer, or with the fly's other odors instead, and what it would take to do without the diagnostic panel.
 It runs on a CPU too (slower). Flies with a `RoiSet.zip` of their own are also scored
 against it. `alseg-predict -h` has the rest (e.g. `--export`, for flies of a database
 download).
