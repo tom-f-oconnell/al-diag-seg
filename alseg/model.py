@@ -65,6 +65,11 @@ class Options:
     segmenter: str = "cellpose"
     batch_size: int = 8  # Cellpose's training batches to start with, halved while one does not fit in the GPU
     final: str = "pred"
+    # the odors Cellpose's two images of responses are made from (`responses.build_channels`), of the model's
+    # (None: all of them). The model's other odors are then only in what ROIs are joined and named by, so a fly
+    # with these odors alone is segmented, joined and named exactly as by a model fit, to the same flies, with
+    # the odors that fly has: a model can take in an odor some flies lack without changing what it does for them
+    image_odors: list[str] | None = None
     # how Cellpose's masks are made (`segment.predict`), also for models saved before these were
     # options (they then take these defaults): picked on the database's flies, scored as partly
     # drawn (see the README)
@@ -228,9 +233,40 @@ class Model:
         return cls(seg, m["xy_um"], pca, tmpl, atl, m["odors"], m["aliases"], m["glomeruli"], o, m.get("info", {}))
 
     # ------------------------------------------------------------- predict
+    def image_odors(self) -> list[str]:
+        """The odors Cellpose's images of responses are made from (`Options.image_odors`), in the model's order."""
+        chosen = self.options.image_odors
+        return list(self.odors) if chosen is None else [x for x in self.odors if x in set(chosen)]
+
+    def fly_odors(self, fly) -> list[int]:
+        """The places, among the model's odors, of those a fly's ``responses`` are of (its ``odors``; all of
+        them for a fly that does not say)."""
+        have = fly.get("odors")
+        return list(range(len(self.odors))) if have is None else [self.odors.index(x) for x in have]
+
+    def template_of(self, fly) -> dict:
+        """The template a fly is named by: the model's, over the odors the fly has (`identity.template_for`)."""
+        idx = self.fly_odors(fly)
+        return self.template if len(idx) == len(self.odors) else identity.template_for(self.template, idx)
+
+    def channels(self, fly) -> np.ndarray:
+        """Cellpose's input images of a fly (`responses.build_channels`), from its responses to the model's
+        image odors: those of them it has, if it lacks some."""
+        idx, img = self.fly_odors(fly), [self.odors.index(x) for x in self.image_odors()]
+        rows = [idx.index(i) for i in img if i in idx]
+        if len(rows) < 2:
+            raise ValueError(f"{fly.get('name')}: it has {len(rows)} of the {len(img)} odors the model's images are made from: at least 2 are needed")
+        present = None if len(rows) == len(img) else [k for k, i in enumerate(img) if i in idx]
+        return responses.build_channels(fly["average"], fly["responses"][rows], self.pca, present)
+
     def predict(self, fly) -> dict:
-        """Segments and names a fly: ``fly`` has ``average``, ``responses`` (in `odors`' order),
-        ``spacing`` and optionally ``hires`` (its anatomical stack, for the atlas).
+        """Segments and names a fly: ``fly`` has ``average``, ``responses`` (in `odors`' order; or of
+        those of them it has, ``odors``, in that order), ``spacing`` and optionally ``hires`` (its
+        anatomical stack, for the atlas).
+
+        A fly that lacks some of the model's odors is joined, refined and named by those it has (its
+        template: `template_of`); Cellpose's images are of the image odors (`Options.image_odors`),
+        makeshift where it lacks some of those (`responses.build_channels`).
 
         Returns:
             dict with ``labels``: each kind of ROIs ('pred': Cellpose's; 'refined_tuning';
@@ -242,10 +278,11 @@ class Model:
             the order of the atlas' names), or None.
         """
         o, resp, sp = self.options, fly["responses"], fly["spacing"]
+        template = self.template_of(fly)
         if self.segmenter == "stand-in":
             pred = _stand_in(fly)
         else:
-            channels = responses.build_channels(fly["average"], resp, self.pca)
+            channels = self.channels(fly)
             split = None
             if o.split and o.join == "tuning":
                 from . import clean_trim
@@ -262,7 +299,7 @@ class Model:
         ids, terms = {}, {}
 
         def name(kind, *args, **kw):
-            ids[kind], terms[kind] = identity.assign_identities(resp, labels[kind], self.template, sp, *args,
+            ids[kind], terms[kind] = identity.assign_identities(resp, labels[kind], template, sp, *args,
                                                                 max_cost=o.max_cost, return_terms=True, **kw)
 
         name("refined_tuning", w_shape=0, w_layout=0)
@@ -449,9 +486,13 @@ def fit(flies, val=(), options: Options | None = None, out=None, progress=None, 
         raise ValueError("no flies to train on")
     durations = {}
     # shared PCA basis on training flies only (inside the AL, i.e. labeled voxels)
-    pca = responses.SharedPCA(3).fit([f["responses"] for f in train_f], masks=[f["labels"] > 0 for f in train_f])
+    all_odors = list(odors or train_f[0]["odors"])
+    if o.image_odors is not None and (len(o.image_odors) < 2 or not set(o.image_odors) <= set(all_odors)):
+        raise ValueError(f"image_odors: at least 2 of the flies' odors ({', '.join(all_odors)}); given {', '.join(o.image_odors)}")
+    img = [i for i, x in enumerate(all_odors) if o.image_odors is None or x in set(o.image_odors)]
+    pca = responses.SharedPCA(3).fit([f["responses"][img] for f in train_f], masks=[f["labels"] > 0 for f in train_f])
     for f in flies:
-        f["channels"] = responses.build_channels(f["average"], f["responses"], pca)
+        f["channels"] = responses.build_channels(f["average"], f["responses"][img], pca)
     xy_um = o.xy_um or float(np.median([f["spacing"][2] for f in flies]))
     print(f"segmenting at {xy_um:.3f} um pixels")
     t = time.time()
@@ -503,4 +544,4 @@ def fit(flies, val=(), options: Options | None = None, out=None, progress=None, 
             "accepted_glomeruli": list(glomeruli) if glomeruli else None,
             "train_flies": [f["name"] for f in train_f], "val_flies": [f["name"] for f in val_f],
             "seconds": {**durations, "fit": time.time() - t0}}
-    return Model(seg, xy_um, pca, template, atl, list(odors or train_f[0]["odors"]), dict(aliases or {}), names, o, info)
+    return Model(seg, xy_um, pca, template, atl, all_odors, dict(aliases or {}), names, o, info)

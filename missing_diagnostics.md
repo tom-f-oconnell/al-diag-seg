@@ -2,11 +2,36 @@
 
 Presenting the diagnostic panel adds to every experiment, so: can a model work on a fly that lacks some or all of it? Measured
 2026-11-15 on the odor response database's fit 7 (86 flies, 20 odors common to all of them) and the database's glomerulus
-responses; nothing was retrained, and nothing here is built yet. The scripts are in the database's repository
-(`notes/missing_diagnostics/`).
+responses; nothing was retrained. The scripts are in the database's repository (`notes/missing_diagnostics/`).
 
-**As it is, no.** `alseg.fly.load_fly` refuses a fly that lacks any of the model's odors. But the approach does not need the
-diagnostics as such: it needs some odor responses to find ROIs, and tuning to a panel it knows to name them.
+The approach does not need the diagnostics as such: it needs some odor responses to find ROIs, and tuning to a panel it knows to
+name them. Since 2026-11-16 a fly may lack some of a model's odors ([below](#a-fly-that-lacks-some-of-a-models-odors)); a fly
+with none of them, named by its other odors, is still [to build](#what-it-would-take).
+
+## A fly that lacks some of a model's odors
+
+`alseg.fly.load_fly` gives a fly the model's odors it has (at least 3: fewer make no tuning), and `Model.predict` goes by
+those:
+
+- **Joined into 3D and named by the odors it has, exactly as by a model fit with those.** The template keeps each training
+  fly's tuning of each glomerulus as it is (not only their mean, each z-scored over the model's odors), so the template of any
+  of the odors is made as a fit to those alone would make it (`identity.template_for`). Position, shape, layout and the atlas
+  read no responses.
+- **Found from images of chosen odors** (`Options.image_odors`; all the model's, unless given). Cellpose's weights are of the
+  images it was trained on, so nothing makes a model trained on images of 23 odors do exactly what one trained on images of 21
+  does. With the images made from the odors every fly has, whichever more the model knows, a fly with those odors gets the same
+  images, joins and names from a model fit with more odors (A) as from one fit, to the same flies, with the odors it has (B):
+  taking an odor into a model costs the flies without it nothing. The odors beyond the image odors are then in joining and
+  names only.
+- **Makeshift where it lacks image odors**: the correlation image of those it has, the component image with the others at the
+  training flies' mean. This is the first table below (10, 5 and 2 of 20): fewer ROIs are found.
+
+Checked on the database's flies (`notes/missing_diagnostics/same_as_fewer.py`; Cellpose's weights fit 7's for both models,
+no atlas): of its 86 flies, which share 21 odors, the 38 with acetophenone @ -4 and valeric acid @ -3 share 23. A (23 odors,
+images of the 21) and B (the 21) give 4 held-out flies, shown only the 21, the same ROIs voxel for voxel and the same names at
+the same costs; and 6 flies without one or both of the two odors get from A what a model made with the 21 or 22 they have
+gives them. What the two odors add where a fly has them: over the 4 held-out flies 80 of 104 names right instead of 77 (2 to
+9 names change per fly), and in two of them one more join of planes' masks (an ROI fewer).
 
 ## What a model uses a fly's responses for
 
@@ -78,11 +103,13 @@ not run end to end.
 
 ## What it would take
 
+To predict a fly with none of a model's odors (items 1 and 2), beyond what a fly lacking some of them now gets (3, built):
+
 1. **Names from whatever odors the fly has**: each glomerulus' tuning per odor from the database, over all its datasets, and the
    tuning term over the odors the fly shares with it. No refit.
 2. **ROIs from whatever odors the fly has**: a fit with the correlation image of each fly's own odors and without the shared
    component image. 2 to 3 hours of GPU.
-3. **Missing diagnostics allowed** in a model as it is (the first table). Small, no refit.
+3. **Missing diagnostics allowed** in a model as it is (the first table). Built ([above](#a-fly-that-lacks-some-of-a-models-odors)).
 
 1 and 2 together, scored on megamat-only and validation2-only predictions against the current ones, would say whether those
 flies can skip the diagnostics.

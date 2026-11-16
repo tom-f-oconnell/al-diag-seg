@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from . import atlas, olfdb, roi_io
-from .fly import load_fly
+from .fly import MIN_ODORS, load_fly
 from .model import Model, Options, fit, write_identity_terms, write_volume
 
 FIT_DOC = """End-to-end example: ImageJ ROIs + odor responses -> trained model -> named, refined ROIs.
@@ -390,12 +390,18 @@ def predict_main(argv=None):
         flies = [f for f in data["flies"] if not a.flies or f["name"] in a.flies]
         for f in flies:
             idx = {o: i for i, o in enumerate(f["odors"])}
-            missing = [o for o in model.odors if o not in idx]
-            if missing:
-                ap.error(f"{f['name']}: the export's flies lack {len(missing)} of the model's odors: {', '.join(missing)}")
-            f["responses"], f["odors"] = f["responses"][[idx[o] for o in model.odors]], list(model.odors)
+            have, missing = [o for o in model.odors if o in idx], [o for o in model.odors if o not in idx]
+            if len(have) < MIN_ODORS:
+                ap.error(f"{f['name']}: the export's flies have {len(have)} of the model's {len(model.odors)} odors (at least {MIN_ODORS} are "
+                         f"needed); they lack {', '.join(missing)}")
+            f["responses"], f["odors"], f["missing"] = f["responses"][[idx[o] for o in have]], have, missing
     else:
         flies = [load_fly(d, model, raw_dir=a.raw[i] if a.raw else None, spacing=a.spacing) for i, d in enumerate(a.fly)]
+    for f in flies:
+        if f.get("missing"):
+            print(f"{f['name']}: lacks {len(f['missing'])} of the model's {len(model.odors)} odors ({', '.join(f['missing'])}): its ROIs are "
+                  "joined and named by those it has" + ("" if set(model.image_odors()) <= set(f["odors"]) else
+                                                        ", and found from images of fewer odors than the model was trained on"))
     a.out.mkdir(parents=True, exist_ok=True)
     final = model.final_kind()
     scored = [f for f in flies if f.get("labels") is not None]

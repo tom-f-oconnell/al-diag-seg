@@ -13,7 +13,8 @@ and from its raw data folder (optional), the ``Experiment.xml`` of a diagnostic 
 
 Odors are matched to the model's by their names as recorded (``odors`` in
 ``trial_frames_and_odors.json``), as the training flies had them (`Model.aliases`), else
-by the names themselves.
+by the names themselves. A fly may lack some of the model's odors (at least `MIN_ODORS` of
+them it must have): `alseg.model.Model.predict` then goes by those it has.
 """
 from __future__ import annotations
 
@@ -31,6 +32,7 @@ TRIALS = "trial_frames_and_odors.json"
 ROISET = "RoiSet.zip"
 CONCAT, CONCAT_AVG = "mocorr_concat.tif", "mocorr_concat_avg.tif"
 ANATOMICAL = re.compile(r"(?:anat|anatomical)(?:_.*)?")  # as the database (hong-data) finds them
+MIN_ODORS = 3  # the odors of a model a fly has at least, to be run on it: fewer make no tuning to join or name ROIs by
 
 
 def recorded_odors(path: Path) -> list[str]:
@@ -54,7 +56,8 @@ def _average(d: Path) -> np.ndarray:
 
 def load_fly(mocorr_dir, model, raw_dir=None, spacing=None, name=None, glomeruli=None, tentative: bool = True,
              stack: bool = True) -> dict:
-    """A fly (as `olfdb.load` gives them) with its responses in ``model``'s odors and order.
+    """A fly (as `olfdb.load` gives them) with its responses in ``model``'s odors and order: those of
+    them it has (``odors``; the others in ``missing``).
 
     Args:
         mocorr_dir: its motion-corrected data folder.
@@ -67,7 +70,7 @@ def load_fly(mocorr_dir, model, raw_dir=None, spacing=None, name=None, glomeruli
             is on the fly's grid already).
 
     Raises:
-        ValueError: if it lacks some of the model's odors (listed), or has no voxel size.
+        ValueError: if it has fewer than `MIN_ODORS` of the model's odors, or no voxel size.
     """
     d = Path(mocorr_dir)
     raw = Path(raw_dir) if raw_dir else None
@@ -87,9 +90,10 @@ def load_fly(mocorr_dir, model, raw_dir=None, spacing=None, name=None, glomeruli
         resp.append(x)
         odors += names
         recs.append(r)
-    missing = [o for o in model.odors if o not in odors]
-    if missing:
-        raise ValueError(f"{d}: none of its recordings has {len(missing)} of the model's odors: {', '.join(missing)}"
+    have, missing = [o for o in model.odors if o in odors], [o for o in model.odors if o not in odors]
+    if len(have) < MIN_ODORS:
+        raise ValueError(f"{d}: its recordings have {len(have)} of the model's {len(model.odors)} odors (at least {MIN_ODORS} are needed); "
+                         f"none has {', '.join(missing)}"
                          + ("" if recs else " (no recording with trialmean_dff.tif and mostly the model's odors)"))
     avg = olfdb.finite(_average(d), d / "average image")
     allr = np.concatenate(resp)
@@ -98,8 +102,8 @@ def load_fly(mocorr_dir, model, raw_dir=None, spacing=None, name=None, glomeruli
     idx = {}
     for i, o in enumerate(odors):
         idx.setdefault(o, []).append(i)
-    f = {"name": name or f"{d.parent.name}_{d.name}", "dir": d, "average": avg, "odors": list(model.odors),
-         "responses": np.stack([allr[idx[o]].mean(0) for o in model.odors]).astype(np.float32)}
+    f = {"name": name or f"{d.parent.name}_{d.name}", "dir": d, "average": avg, "odors": have, "missing": missing,
+         "responses": np.stack([allr[idx[o]].mean(0) for o in have]).astype(np.float32)}
     xml = next((raw / r.name / "Experiment.xml" for r in recs if raw and (raw / r.name / "Experiment.xml").is_file()), None)
     if spacing is not None:
         f["spacing"] = tuple(float(s) for s in spacing)

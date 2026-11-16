@@ -83,7 +83,8 @@ You give the fly's motion-corrected folder and its raw folder (`load_fly` in
 
 - **Responses**: every subfolder with `trialmean_dff.tif` and
   `trial_frames_and_odors.json` where more than half the odors are the model's 20. They
-  are reordered to (20, Z, Y, X); the fly must have all 20, and extra odors are ignored.
+  are reordered to (20, Z, Y, X); extra odors are ignored, and a fly may lack some of the
+  model's (it needs 3 of them: [missing_diagnostics.md](missing_diagnostics.md)).
 - **Average**: `mocorr_concat_avg.tif`, else the mean of `mocorr_concat.tif`, computed in
   memory.
 - **Voxel size**: `Experiment.xml` of one of those recordings in the raw folder.
@@ -121,8 +122,10 @@ fits: none costing `--max-cost` or less, 0.6 unless the model was fit with anoth
 plane, as ImageJ and al_analysis read them; `<fly>_identity_terms.json` has what each name
 cost (each term's value for the ROI's 5 best glomeruli, and the weights). Its odors are matched to the
 model's by their names as recorded; it needs all of them (the ones it lacks are listed).
-A fly needs all of the model's odors as it is; [missing_diagnostics.md](missing_diagnostics.md) has what the model
-does with fewer, or with the fly's other odors instead, and what it would take to do without the diagnostic panel.
+A fly may lack some of the model's odors (it needs 3 of them): its ROIs are then joined and named by those it has, exactly
+as by a model fit to the same flies with those odors, and found as well as by such a model if it has the odors Cellpose's
+images are made from (`Options.image_odors`). [missing_diagnostics.md](missing_diagnostics.md) has how, what it costs to lack
+those too, and what it would take to do without the diagnostic panel.
 It runs on a CPU too (slower). Flies with a `RoiSet.zip` of their own are also scored
 against it. `alseg-predict -h` has the rest (e.g. `--export`, for flies of a database
 download).
@@ -131,7 +134,7 @@ download).
 
 | File | What it does |
 |---|---|
-| `alseg/model.py` | `fit`: the whole model (Cellpose weights, PCA basis, identity template, atlas, odors); `Model.save`/`load` (a folder); `Model.predict` (a fly → ROIs of each kind, named); `Model.evaluate` (scores against a fly's own ROIs, per fly and per glomerulus). |
+| `alseg/model.py` | `fit`: the whole model (Cellpose weights, PCA basis, identity template, atlas, odors; `Options.image_odors`: the odors Cellpose's images are made from, if not all); `Model.save`/`load` (a folder); `Model.predict` (a fly → ROIs of each kind, named, by the odors of the model it has); `Model.evaluate` (scores against a fly's own ROIs, per fly and per glomerulus). |
 | `alseg/fly.py` | A fly from its folders as al_analysis leaves them (not a download), with its odors matched to a model's, to run the model on. |
 | `alseg/cli.py` | The commands: `alseg-fit` (`run_pipeline.py`) and `alseg-predict`. |
 | `alseg/olfdb.py` | Reads the database's ROI training download: per fly, its diagnostic recordings' `trialmean_dff.tif` one after another, lined up by odor with every other fly's (odors named alike by the database), its anatomy, its RoiSet's glomeruli (as the database tells them from other ROIs), voxel sizes from `Experiment.xml`, and its anatomical stack from ThorImage's `ChanA_*.tif` files. |

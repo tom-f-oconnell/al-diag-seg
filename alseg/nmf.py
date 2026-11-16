@@ -439,7 +439,7 @@ def name(model, fly: dict, labels: np.ndarray, prior=None, prior_names=None, kee
     with its atlas on the fly's grid, ``prior``, of the glomeruli ``prior_names``, if it has one).
 
     Args:
-        fly: its ``responses`` (in the model's odors) and ``spacing``.
+        fly: its ``responses`` (in the model's odors, or those of them it has: ``odors``) and ``spacing``.
         keep: {label: name or None} of ROIs that keep their names (`alseg.identity.assign_identities`'s
             ``fixed``).
 
@@ -450,7 +450,9 @@ def name(model, fly: dict, labels: np.ndarray, prior=None, prior_names=None, kee
     from . import identity
 
     kw = {} if prior is not None else {"w_shape": 0, "w_layout": 0}
-    return identity.assign_identities(fly["responses"], labels, model.template, fly["spacing"], prior, prior_names,
+    # (a fly that lacks some of the model's odors: by those it has, as the model names its ROIs)
+    template = model.template_of(fly) if hasattr(model, "template_of") else model.template
+    return identity.assign_identities(fly["responses"], labels, template, fly["spacing"], prior, prior_names,
                                       max_cost=model.options.max_cost, return_terms=True, fixed=keep, **kw)
 
 

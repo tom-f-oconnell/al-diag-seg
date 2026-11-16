@@ -54,7 +54,7 @@ def roi_features(responses, labels, spacing_zyx=(1.0, 1.0, 1.0), origin=None):
     if origin is None:
         origin = cents.mean(0)
     return {
-        l: {"tuning": _z(tun[l]), "centroid": c - origin, "shape": shape_descriptor(labels == l, sp)}
+        l: {"tuning": _z(tun[l]), "raw": np.asarray(tun[l], float), "centroid": c - origin, "shape": shape_descriptor(labels == l, sp)}
         for l, c in zip(labs, cents)
     }
 
@@ -62,7 +62,10 @@ def roi_features(responses, labels, spacing_zyx=(1.0, 1.0, 1.0), origin=None):
 def build_template(flies):
     """flies: [{"responses", "labels", "lut": {label: name}, "spacing"}, ...]
 
-    Returns {name: {"tuning", "centroid", "centroid_sd", "shape", "shape_sd", "n"}}
+    Returns {name: {"tuning", "tunings", "centroid", "centroid_sd", "shape", "shape_sd", "n"}}:
+    ``tuning`` the mean over the flies of the glomerulus' tuning, each z-scored over the odors;
+    ``tunings`` each fly's as it is ((flies, odors)), from which the template of some of the odors
+    is made as a fit to those alone would make it (`template_for`).
     """
     acc: dict[str, list] = {}
     for f in flies:
@@ -79,6 +82,7 @@ def build_template(flies):
         S = np.stack([r["shape"] for r in rows])
         tmpl[name] = {
             "tuning": np.stack([r["tuning"] for r in rows]).mean(0),
+            "tunings": np.stack([r["raw"] for r in rows]),
             "centroid": C.mean(0),
             "centroid_sd": float(C.std(0).mean()) if len(C) > 1 else 10.0,
             "shape": S.mean(0),
@@ -86,6 +90,27 @@ def build_template(flies):
             "n": len(rows),
         }
     return tmpl
+
+
+def template_for(template: dict, odors) -> dict:
+    """A template's glomeruli with their tuning over some of its odors only (``odors``: their places
+    among the template's, in order), for a fly that lacks the others.
+
+    Where the template has each training fly's tuning (``tunings``: `build_template`), it is what
+    `build_template` gives of the same flies with those odors alone: each fly's tuning z-scored over
+    them, then the mean. So a fly is named by a model fit with more odors than it has exactly as by one
+    fit, to the same flies, with the odors it has. A template without them (a model saved before) gives
+    its mean tuning at those odors, which is not quite that.
+    """
+    idx = list(odors)
+    out = {}
+    for n, g in template.items():
+        if g.get("tunings") is not None:
+            t = np.asarray(g["tunings"], float)[:, idx]
+            out[n] = {**g, "tuning": np.stack([_z(r) for r in t]).mean(0), "tunings": t}
+        else:
+            out[n] = {**g, "tuning": np.asarray(g["tuning"])[idx]}
+    return out
 
 
 def atlas_centroids(prior, prior_names, spacing_zyx):

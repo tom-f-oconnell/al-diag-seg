@@ -87,10 +87,10 @@ class SharedPCA:
         return self
 
     def transform(self, r: np.ndarray) -> np.ndarray:
-        """(n_odors, Z, Y, X) -> (k, Z, Y, X)"""
+        """(n_odors, Z, Y, X) -> (k, Z, Y, X) (as many components as there are odors, if those are fewer)"""
         v = _zscore_vectors(r)
         p = (v - self.mean_) @ self.components_.T
-        return p.T.reshape((self.k,) + r.shape[1:])
+        return p.T.reshape((p.shape[1],) + r.shape[1:])
 
 
 def _zscore_vectors(r):
@@ -104,8 +104,13 @@ def normalize01(img: np.ndarray, lo: float = 1, hi: float = 99.5) -> np.ndarray:
     return np.clip((img - a) / (b - a + 1e-8), 0, 1).astype(np.float32)
 
 
-def build_channels(average: np.ndarray, responses: np.ndarray, pca: SharedPCA) -> np.ndarray:
+def build_channels(average: np.ndarray, responses: np.ndarray, pca: SharedPCA, present=None) -> np.ndarray:
     """Stack CNN input channels: (C, Z, Y, X), each scaled to [0, 1].
+
+    ``present``: where a fly lacks some of the odors of ``pca``, the places among them (in order) of
+    those ``responses`` has. The local correlation is then of those alone, and the component has the
+    others at the training flies' mean (nothing of them in it): a makeshift, as Cellpose was trained on
+    images of all of them (the database's missing_diagnostics.md says what that costs).
 
     C = 3 to match Cellpose-SAM's 3-channel input:
       0: average image (mean / baseline fluorescence)
@@ -116,6 +121,11 @@ def build_channels(average: np.ndarray, responses: np.ndarray, pca: SharedPCA) -
     can simply feed all of them.
     """
     lc = local_correlation(responses)
-    pcs = pca.transform(responses)
-    chans = [normalize01(average), normalize01(lc), normalize01(pcs[0])]
+    if present is None or len(present) == len(pca.mean_):
+        pc = pca.transform(responses)[0]
+    else:
+        v = np.tile(pca.mean_, (responses[0].size, 1))
+        v[:, list(present)] = _zscore_vectors(responses)
+        pc = ((v - pca.mean_) @ pca.components_[0]).reshape(responses.shape[1:])
+    chans = [normalize01(average), normalize01(lc), normalize01(pc)]
     return np.stack(chans)
