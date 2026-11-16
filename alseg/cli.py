@@ -140,7 +140,8 @@ def _clean_args(g, fit: bool) -> None:
                         "of. Each step alone is written too (<fly>_clean_<step>.tif)"
                         + ("" if fit else ". Default: the model's; --clean alone: none"))
     g.add_argument("--split", action=argparse.BooleanOptionalAction, default=False if fit else None,
-                   help="split a plane's masks that hold two glomeruli tuned differently, before the planes' are joined"
+                   help="split a plane's masks that hold two glomeruli tuned differently, and join the planes' masks "
+                        "again (<fly>_split.tif; Cellpose's own are <fly>_pred.tif): the ROIs --clean then cleans"
                         + ("" if fit else ". Default: the model's"))
 
 

@@ -19,6 +19,7 @@ import numpy as np
 
 STEPS = {"trim": ("clean_trim", "trim"), "margin": ("clean_margin", "margin"), "core": ("clean_margin", "core")}
 EVIDENCE = ("trim",)  # the steps that read the fly's evidence
+REPORTS = ("trim",)  # the steps that say what they did (`apply`'s reports)
 KIND = "clean"  # the kind of ROIs the steps asked for make (`Model.predict`); one step alone: clean_<step>
 
 
@@ -59,10 +60,11 @@ def usable(name: str, fly: dict) -> bool:
     return name != "core" or fly.get("cellprob") is not None
 
 
-def apply(labels: np.ndarray, fly: dict, steps, params: dict | None = None) -> np.ndarray:
+def apply(labels: np.ndarray, fly: dict, steps, params: dict | None = None, reports: dict | None = None) -> np.ndarray:
     """``labels`` after ``steps`` (in `STEPS`' order), each with its parameters
     (``params[step]``: {name: value}, the step's defaults otherwise). Steps that cannot run on the
-    fly (`usable`) are left out."""
+    fly (`usable`) are left out. ``reports``, if given, gets the report of each step that makes one
+    (`REPORTS`: {step: its report}), as the step's ``return_report`` gives it."""
     params = params or {}
     out = labels
     for s in ordered(steps):
@@ -70,5 +72,8 @@ def apply(labels: np.ndarray, fly: dict, steps, params: dict | None = None) -> n
             continue
         if s in EVIDENCE:
             ensure_evidence(fly)
-        out = step(s)(out, fly, **(params.get(s) or {}))
+        if reports is not None and s in REPORTS:
+            out, reports[s] = step(s)(out, fly, return_report=True, **(params.get(s) or {}))
+        else:
+            out = step(s)(out, fly, **(params.get(s) or {}))
     return out

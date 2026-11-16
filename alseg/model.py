@@ -84,8 +84,8 @@ class Options:
     # the most naming an ROI as a glomerulus may cost (`identity.assign_identities`): an ROI none
     # costs less for is left unnamed (numbered); also for models saved before it was an option
     max_cost: float = 0.6
-    # masks over two glomeruli split by their tuning before the planes' are joined (`alseg.clean_trim.split`,
-    # with clean_params["split"]): changes Cellpose's ROIs themselves, so every kind
+    # masks over two glomeruli split by their tuning (`alseg.clean_trim.split`, with clean_params["split"]), and the
+    # planes' masks joined again: the "split" kind, which the steps of ``clean`` then clean (`Model.refine`)
     split: bool = False
     clean: list[str] = field(default_factory=list)
     clean_params: dict = field(default_factory=dict)
@@ -259,6 +259,34 @@ class Model:
         present = None if len(rows) == len(img) else [k for k, i in enumerate(img) if i in idx]
         return responses.build_channels(fly["average"], fly["responses"][rows], self.pca, present)
 
+    def prior_of(self, fly):
+        """The model's atlas on ``fly``'s grid (`atlas.atlas_to_fly`: (glomeruli, Z, Y, X), each one's
+        probability, in the order of the atlas' names), registered through its anatomical stack
+        (``hires``) if it has one; None for a model without an atlas."""
+        if self.atlas is None:
+            return None
+        o = self.options
+        if fly.get("hires") and fly["hires"].get("mirror") is None:
+            atlas_mod.orient_hires(fly, o.hires_reg)
+        return atlas_mod.atlas_to_fly(self.atlas, fly, transform=o.reg, hires_transform=o.hires_reg)
+
+    def name(self, fly, labels, prior=None, prior_names=None, **kw):
+        """Names a fly's ROIs (``labels``) as the model names those it predicts: with its atlas on the
+        fly's grid (``prior``, of the glomeruli ``prior_names``: the atlas' by default), if given; else
+        by tuning and position alone (no shape or layout terms). ``kw``: more of
+        `identity.assign_identities`' arguments.
+
+        Returns:
+            ({label: (name or None, cost, confidence)}, what the costs are made of), as
+            `identity.assign_identities` with ``return_terms``.
+        """
+        if prior is None:
+            kw, args = {"w_shape": 0, "w_layout": 0, **kw}, ()
+        else:
+            args = (prior, list(prior_names) if prior_names is not None else self.atlas.names)
+        return identity.assign_identities(fly["responses"], labels, self.template_of(fly), fly["spacing"], *args,
+                                          max_cost=self.options.max_cost, return_terms=True, **kw)
+
     def predict(self, fly) -> dict:
         """Segments and names a fly: ``fly`` has ``average``, ``responses`` (in `odors`' order; or of
         those of them it has, ``odors``, in that order), ``spacing`` and optionally ``hires`` (its
@@ -270,72 +298,141 @@ class Model:
 
         Returns:
             dict with ``labels``: each kind of ROIs ('pred': Cellpose's; 'refined_tuning';
-            'refined_prior', with the atlas), ``identities``: for each, {label: (name or
-            None, cost, confidence)}, ``identity_terms``: for each, what those costs are
-            made of (`identity.assign_identities`), ``final``: the kind to use,
+            'refined_prior', with the atlas; 'split' and 'clean', Cellpose's cleaned as
+            `Options.split` and `Options.clean` ask (`refine`); and 'clean_<step>', each cleaning
+            step alone on Cellpose's, split if that was asked for), ``identities``: for each,
+            {label: (name or None, cost, confidence)}, ``identity_terms``: for each, what those
+            costs are made of (`identity.assign_identities`), ``final``: the kind to use,
             ``atlas_maxprob``: the atlas on the fly's grid (its largest probability), or None,
-            and ``prior``: the atlas there, each glomerulus' probability ((glomeruli, Z, Y, X), in
-            the order of the atlas' names), or None.
+            ``prior``: the atlas there, each glomerulus' probability ((glomeruli, Z, Y, X), in
+            the order of the atlas' names), or None, ``cellprob``: Cellpose's cell probabilities
+            ((Z, Y, X) on the fly's grid; None for the stand-in segmenter), and ``report``: what
+            cleaning did to each ROI (`refine`'s; None if none was asked for).
         """
         o, resp, sp = self.options, fly["responses"], fly["spacing"]
-        template = self.template_of(fly)
         if self.segmenter == "stand-in":
             pred = _stand_in(fly)
         else:
             channels = self.channels(fly)
-            split = None
-            if o.split and o.join == "tuning":
-                from . import clean_trim
-
-                clean.ensure_evidence(fly)
-                split = lambda m: clean_trim.split(m, fly, **(o.clean_params.get("split") or {}))  # noqa: E731
             out = segment.predict(self.segmenter, channels, gpu=use_gpu(o.gpu), spacing=sp, xy_um=self.xy_um,
                                   cellprob_threshold=o.cellprob_threshold, flow_threshold=o.flow_threshold,
                                   dilate=o.dilate, responses=resp if o.join == "tuning" else None,
-                                  join_overlap=o.join_overlap, join_corr=o.join_corr, return_cellprob=True, split=split)
+                                  join_overlap=o.join_overlap, join_corr=o.join_corr, return_cellprob=True)
             # (Cellpose's cell probabilities, for `clean`'s core)
             pred, fly["cellprob"] = out if isinstance(out, tuple) else (out, None)
         labels = {"pred": pred, "refined_tuning": refine.refine_by_tuning(resp, pred, sp)}
         ids, terms = {}, {}
 
-        def name(kind, *args, **kw):
-            ids[kind], terms[kind] = identity.assign_identities(resp, labels[kind], template, sp, *args,
-                                                                max_cost=o.max_cost, return_terms=True, **kw)
+        def name(kind, *args):
+            ids[kind], terms[kind] = self.name(fly, labels[kind], *args)
 
-        name("refined_tuning", w_shape=0, w_layout=0)
+        name("refined_tuning")
         maxprob = prior = None
         if self.atlas is not None:
-            if fly.get("hires") and fly["hires"].get("mirror") is None:
-                atlas_mod.orient_hires(fly, o.hires_reg)
-            prior = atlas_mod.atlas_to_fly(self.atlas, fly, transform=o.reg, hires_transform=o.hires_reg)
+            prior = self.prior_of(fly)
             # name the raw prediction first so the prior knows which glomerulus each ROI is
-            name("pred", prior, self.atlas.names)
+            name("pred", prior)
             names0 = {l: v[0] for l, v in ids["pred"].items()}
             labels["refined_prior"] = refine.refine_with_prior(resp, pred, names0, prior, self.atlas.names, sp,
                                                                w_prior=o.w_prior)
-            name("refined_prior", prior, self.atlas.names)
+            name("refined_prior", prior)
             maxprob = prior.max(0).astype(np.float32)
         else:
-            name("pred", w_shape=0, w_layout=0)
-        # Cellpose's ROIs cleaned: by each step alone, and by those asked for; named as Cellpose's are
-        kinds = {f"{clean.KIND}_{st}": [st] for st in clean.STEPS if clean.usable(st, fly)}
-        if o.clean:
-            kinds[clean.KIND] = o.clean
-        for kind, steps in kinds.items():
-            labels[kind] = clean.apply(pred, fly, steps, o.clean_params)
+            name("pred")
+        report, base = None, "pred"
+        if o.split or o.clean:
+            r = self.refine(fly, pred, ids["pred"], terms["pred"], prior)
+            for kind in r["labels"]:
+                labels[kind], ids[kind], terms[kind] = r["labels"][kind], r["identities"][kind], r["identity_terms"][kind]
+            report, base = r["report"], "split" if o.split else "pred"
+        # each cleaning step alone, on Cellpose's ROIs (split, if asked for); named as those are
+        for st in clean.STEPS:
+            if not clean.usable(st, fly):
+                continue
+            kind = f"{clean.KIND}_{st}"
+            labels[kind] = clean.apply(labels[base], fly, [st], o.clean_params)
             left = set(np.unique(labels[kind]).tolist())
-            ids[kind] = {l: v for l, v in ids["pred"].items() if l in left}
-            terms[kind] = terms["pred"]
+            ids[kind] = {l: v for l, v in ids[base].items() if l in left}
+            terms[kind] = terms[base]
         return {"labels": labels, "identities": ids, "identity_terms": terms, "atlas_maxprob": maxprob,
-                "prior": prior, "final": self.final_kind()}
+                "prior": prior, "final": self.final_kind(), "cellprob": fly.get("cellprob"), "report": report}
+
+    def refine(self, fly, pred, identities, terms=None, prior=None, prior_names=None, split=None, steps=None,
+               params=None) -> dict:
+        """Cellpose's ROIs of a fly (``pred``, named ``identities``, at the costs ``terms``: `predict`'s
+        "pred") cleaned of their neighbours, as `Options.split`, `Options.clean` and `Options.clean_params`
+        say, or ``split``, ``steps`` and ``params`` where given (``params`` over the options'):
+
+        - ``split``: each in-plane mask over two glomeruli tuned unlike is cut in two
+          (`alseg.clean_trim.split`, with ``params["split"]``), and the planes' masks are joined again,
+          as the model joins them (`segment.rejoin`), and all named again (`name`: with the atlas on the
+          fly's grid, ``prior``, of the glomeruli ``prior_names``, if given). If none is cut, they are
+          left as they are.
+        - then ``steps`` (of `alseg.clean.STEPS`, applied in that order, each with ``params[step]``),
+          which only remove pixels, so names are kept. Those that cannot run on the fly (core, without
+          its ``cellprob``) are left out.
+
+        `predict` does this as the options ask, and it can be done after, from what a prediction kept:
+        its "pred" ROIs and their names, the atlas on the fly's grid (to name ROIs split) and
+        Cellpose's cell probabilities (for core). The fly needs ``responses``, ``spacing`` and, for
+        split and trim, its folder (``dir``), where its per-trial evidence is read from, once
+        (`clean.ensure_evidence`).
+
+        Returns:
+            dict with ``labels``, ``identities`` and ``identity_terms`` of each kind made: "split"
+            (if asked for) and "clean" (if steps were, even if none could run); ``final``: the last
+            of them ("pred" if none); ``steps``: those done, in order ("split" first, if it was);
+            and ``report``, by the final kind's labels: ``split`` ({label: {z: the label in ``pred``
+            of the mask it is a part of}}, on each plane where it is a part of a mask cut in two)
+            and ``trimmed`` ({label: {z: the share of its area there that trim kept}}, where it cut
+            some).
+        """
+        from . import clean_trim
+
+        o = self.options
+        split = o.split if split is None else split
+        steps = clean.ordered(o.clean if steps is None else steps)
+        params = {**o.clean_params, **(params or {})}
+        labels, ids, terms_of = {}, {}, {}
+        base, base_ids, base_terms = pred, identities, terms
+        done, cut_from, trimmed = [], {}, {}
+        if split:
+            clean.ensure_evidence(fly)
+            cut, rep = clean_trim.split(pred, fly, return_report=True, **(params.get("split") or {}))
+            if rep["split"]:
+                base = segment.rejoin(cut, fly["responses"], o.join, o.join_overlap, o.join_corr)
+                base_ids, base_terms = self.name(fly, base, prior, prior_names)
+                for lab, z in rep["split"]:
+                    for part in np.unique(base[z][pred[z] == lab]):
+                        if part:
+                            cut_from.setdefault(int(part), {})[int(z)] = int(lab)
+            labels["split"], ids["split"], terms_of["split"] = base, base_ids, base_terms
+            done.append("split")
+        final = "split" if split else "pred"
+        if steps:
+            run = [s for s in steps if clean.usable(s, fly)]
+            reports = {}
+            lab = clean.apply(base, fly, run, params, reports=reports)
+            left = set(np.unique(lab).tolist())
+            labels[clean.KIND], ids[clean.KIND], terms_of[clean.KIND] = lab, {l: v for l, v in base_ids.items() if l in left}, base_terms
+            done += run
+            for (l, z), frac in ((reports.get("trim") or {}).get("kept") or {}).items():
+                if frac < 1 and l in left:
+                    trimmed.setdefault(int(l), {})[int(z)] = float(frac)
+            cut_from = {l: v for l, v in cut_from.items() if l in left}
+            final = clean.KIND
+        return {"labels": labels, "identities": ids, "identity_terms": terms_of, "final": final, "steps": done,
+                "report": {"split": cut_from, "trimmed": trimmed}}
 
     def final_kind(self) -> str:
-        """The kind of ROIs a fly's are (`Options.final`): 'pred' (Cellpose's), 'clean' (Cellpose's after
-        the steps of `Options.clean`), else the refined ones: 'refined_prior' with the atlas,
-        'refined_tuning' without."""
-        if self.options.final == "pred" or (self.options.final == clean.KIND and not self.options.clean):
-            return "pred"
-        if self.options.final == clean.KIND:
+        """The kind of ROIs a fly's are (`Options.final`): 'pred' (Cellpose's; 'split', those with
+        masks over two glomeruli split, if `Options.split`), 'clean' (those after the steps of
+        `Options.clean`), else the refined ones: 'refined_prior' with the atlas, 'refined_tuning'
+        without."""
+        o = self.options
+        if o.final == "pred" or (o.final == clean.KIND and not o.clean):
+            return "split" if o.split else "pred"
+        if o.final == clean.KIND:
             return clean.KIND
         return "refined_prior" if self.atlas is not None else "refined_tuning"
 
@@ -381,60 +478,25 @@ class Model:
                     write_volume(out / f"{f['name']}_atlas_maxprob.tif", p["atlas_maxprob"])
                     if priors:
                         write_prior(out / f"{f['name']}_atlas_prior.npz", p["prior"], self.atlas.names)
-            ct = refine.crosstalk_report(f["responses"], f["labels"], f["spacing"])
-            rows.append({"fly": f["name"], "rois": "manual", "n": len(np.unique(f["labels"])) - 1, "recall": "", "precision": "",
-                         "dice": "", "splits": "", "merges": "", "n_scored": "",
-                         "n_2d": int(sum(len(np.unique(z)) - 1 for z in f["labels"])), "n_scored_2d": "",
-                         "recall_2d": "", "precision_2d": "", "dice_2d": "",
-                         "coherence": np.mean(list(ct["coherence"].values())) if ct["coherence"] else "",
-                         "neighbor_corr": np.mean(list(ct["neighbor_corr"].values())) if ct["neighbor_corr"] else "",
-                         "leak": np.mean(np.abs(list(ct["leak"].values()))) if ct["leak"] else "",
-                         **_purity(f["responses"], f["labels"], f["spacing"]), "breadth": "", "breadth_manual": ""})
+            rows.append(manual_row(f))
+            # (cleaned ROIs keep the labels of those they were cleaned from: Cellpose's, split if that was asked for)
+            base = p["labels"].get("split", p["labels"]["pred"])
             for kind, lab in p["labels"].items():
                 names = {l: v[0] for l, v in p["identities"][kind].items()}
                 if out:
                     write_volume(out / f"{f['name']}_{kind}.tif", lab.astype(np.uint16))
                     roi_io.write_roiset(lab, names, out / f"{f['name']}_{kind}_RoiSet.zip")
                     write_identity_terms(out / f"{f['name']}_identity_terms_{kind}.json", p["identity_terms"][kind])
-                geo = metrics.match_report(f["labels"], lab, partly_drawn=partly_drawn)
-                g2 = metrics.match_report_2d(f["labels"], lab, partly_drawn=partly_drawn)
-                ct = refine.crosstalk_report(f["responses"], lab, f["spacing"])
-                rows.append({
-                    "fly": f["name"], "rois": kind, "n": len(np.unique(lab)) - 1,
-                    "recall": geo.get("recall", ""), "precision": geo.get("precision", ""),
-                    "dice": geo.get("mean_dice_matched", ""), "splits": geo.get("splits", ""), "merges": geo.get("merges", ""),
-                    "n_scored": geo["n_scored"], "n_2d": g2["n_pred"], "n_scored_2d": g2["n_scored"],
-                    "recall_2d": g2["recall"], "precision_2d": g2["precision"],
-                    "dice_2d": g2["mean_dice_matched"],
-                    "coherence": np.mean(list(ct["coherence"].values())) if ct["coherence"] else "",
-                    "neighbor_corr": np.mean(list(ct["neighbor_corr"].values())) if ct["neighbor_corr"] else "",
-                    "leak": np.mean(np.abs(list(ct["leak"].values()))) if ct["leak"] else "",
-                    # (cleaned ROIs' neighbours are those Cellpose's had, however far they now keep)
-                    **_purity(f["responses"], lab, f["spacing"], p["labels"]["pred"] if kind.startswith(clean.KIND) else None),
-                })
-                br = refine.breadth(f["responses"], f["labels"], lab)
-                rows[-1].update(breadth="" if br["pred"] is None else br["pred"],
-                                breadth_manual="" if br["manual"] is None else br["manual"])
-                if partly_drawn:
-                    iou, g_ids, p_ids, _ = metrics.iou_matrix_partly_drawn(f["labels"], lab)
-                else:
-                    iou, g_ids, p_ids = metrics.iou_matrix(f["labels"], lab)
-                correct = total = 0
-                id_lines = []
-                for j, pl in enumerate(p_ids):
-                    manual = lut.get(int(g_ids[iou[:, j].argmax()])) if iou.size and iou[:, j].max() > NAME_IOU else None
-                    name, cost, conf = p["identities"][kind].get(int(pl), (None, np.nan, np.nan))
-                    id_lines.append([int(pl), name, manual, f"{cost:.3f}", f"{conf:.3f}"])
-                    if manual:
-                        total += 1
-                        correct += name == manual
-                id_rows.append({"fly": f["name"], "rois": kind, "correct": correct, "total": total})
+                s = score(f, lab, p["identities"][kind], kind, base if kind.startswith(clean.KIND) else None, partly_drawn)
+                rows.append(s["row"])
+                id_rows.append({"fly": f["name"], "rois": kind, **s["identity"]})
                 if out:
                     with open(out / f"{f['name']}_identities_{kind}.csv", "w", newline="") as fh:
                         w = csv.writer(fh)
                         w.writerow(["label", "assigned", "manual", "cost", "confidence"])
-                        w.writerows(id_lines)
+                        w.writerows(s["lines"])
                 if kind == final:
+                    iou, g_ids, p_ids = s["match"]
                     named = {int(pl): p["identities"][kind].get(int(pl), (None,))[0] for pl in p_ids}
                     for gi, g in enumerate(g_ids):
                         name = lut.get(int(g))
@@ -464,6 +526,71 @@ class Model:
         plain = lambda v: float(v) if isinstance(v, (float, np.floating)) else v  # noqa: E731
         return {"summary": [{k: plain(v) for k, v in r.items()} for r in rows], "identity": id_rows, "glomeruli": glom,
                 "final": final, "scoring": "partly drawn" if partly_drawn else "strict"}
+
+
+def manual_row(fly) -> dict:
+    """A fly's own ROIs (``labels``) as a row of `Model.evaluate`'s summary ("manual"): how many, as 3D
+    objects and in-plane masks, their crosstalk and how they keep from each other (`_purity`), to
+    compare predicted ROIs with ('' where there is nothing to say)."""
+    lab, ct = fly["labels"], refine.crosstalk_report(fly["responses"], fly["labels"], fly["spacing"])
+    return {"fly": fly["name"], "rois": "manual", "n": len(np.unique(lab)) - 1, "recall": "", "precision": "",
+            "dice": "", "splits": "", "merges": "", "n_scored": "",
+            "n_2d": int(sum(len(np.unique(z)) - 1 for z in lab)), "n_scored_2d": "",
+            "recall_2d": "", "precision_2d": "", "dice_2d": "",
+            "coherence": np.mean(list(ct["coherence"].values())) if ct["coherence"] else "",
+            "neighbor_corr": np.mean(list(ct["neighbor_corr"].values())) if ct["neighbor_corr"] else "",
+            "leak": np.mean(np.abs(list(ct["leak"].values()))) if ct["leak"] else "",
+            **_purity(fly["responses"], lab, fly["spacing"]), "breadth": "", "breadth_manual": ""}
+
+
+def score(fly, labels, identities=None, kind: str = "pred", ref=None, partly_drawn: bool = True) -> dict:
+    """Scores one kind of a fly's predicted ROIs (``labels``, named ``identities``: {label: (name, cost,
+    confidence)}) as `Model.evaluate` does: how they keep from each other (crosstalk, `_purity`: against
+    the neighbours ``ref`` had, the ROIs they were cleaned from, if given) and, if the fly has ROIs of its
+    own (``labels``, named by its ``lut``), how they match them, as 3D objects and plane by plane (as
+    ``partly_drawn`` says: see `Model.evaluate`), and whether they are named as the one they overlap.
+
+    Returns:
+        dict with ``row`` (`Model.evaluate`'s summary row of the kind, ``kind``: '' for what cannot be
+        said, as all that needs the fly's own ROIs, for a fly without them) and, for a fly with ROIs of
+        its own (else None each): ``identity`` ({"correct", "total"}: of the predicted ROIs overlapping
+        one of its own by IoU over `NAME_IOU`, those named as it), ``lines`` (per predicted ROI: its
+        label, name, the manual one's name, cost and confidence) and ``match`` ((IoU matrix, the manual
+        ROIs' labels, the predicted ones'), as `metrics.iou_matrix` gives them).
+    """
+    resp, sp, gt = fly["responses"], fly["spacing"], fly.get("labels")
+    ct = refine.crosstalk_report(resp, labels, sp)
+    row = {"fly": fly.get("name"), "rois": kind, "n": len(np.unique(labels)) - 1, "recall": "", "precision": "", "dice": "",
+           "splits": "", "merges": "", "n_scored": "", "n_2d": int(sum(len(np.unique(z)) - 1 for z in labels)), "n_scored_2d": "",
+           "recall_2d": "", "precision_2d": "", "dice_2d": "",
+           "coherence": np.mean(list(ct["coherence"].values())) if ct["coherence"] else "",
+           "neighbor_corr": np.mean(list(ct["neighbor_corr"].values())) if ct["neighbor_corr"] else "",
+           "leak": np.mean(np.abs(list(ct["leak"].values()))) if ct["leak"] else "",
+           **_purity(resp, labels, sp, ref), "breadth": "", "breadth_manual": ""}
+    if gt is None:
+        return {"row": row, "identity": None, "lines": None, "match": None}
+    geo = metrics.match_report(gt, labels, partly_drawn=partly_drawn)
+    g2 = metrics.match_report_2d(gt, labels, partly_drawn=partly_drawn)
+    br = refine.breadth(resp, gt, labels)
+    row.update(recall=geo.get("recall", ""), precision=geo.get("precision", ""), dice=geo.get("mean_dice_matched", ""),
+               splits=geo.get("splits", ""), merges=geo.get("merges", ""), n_scored=geo["n_scored"], n_2d=g2["n_pred"],
+               n_scored_2d=g2["n_scored"], recall_2d=g2["recall"], precision_2d=g2["precision"], dice_2d=g2["mean_dice_matched"],
+               breadth="" if br["pred"] is None else br["pred"], breadth_manual="" if br["manual"] is None else br["manual"])
+    if partly_drawn:
+        iou, g_ids, p_ids, _ = metrics.iou_matrix_partly_drawn(gt, labels)
+    else:
+        iou, g_ids, p_ids = metrics.iou_matrix(gt, labels)
+    lut, identities = fly["lut"], identities or {}
+    correct = total = 0
+    lines = []
+    for j, pl in enumerate(p_ids):
+        manual = lut.get(int(g_ids[iou[:, j].argmax()])) if iou.size and iou[:, j].max() > NAME_IOU else None
+        name, cost, conf = identities.get(int(pl), (None, np.nan, np.nan))
+        lines.append([int(pl), name, manual, f"{cost:.3f}", f"{conf:.3f}"])
+        if manual:
+            total += 1
+            correct += name == manual
+    return {"row": row, "identity": {"correct": correct, "total": total}, "lines": lines, "match": (iou, g_ids, p_ids)}
 
 
 def fit(flies, val=(), options: Options | None = None, out=None, progress=None, odors=None, aliases=None,

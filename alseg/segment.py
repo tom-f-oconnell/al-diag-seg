@@ -238,7 +238,6 @@ def predict(
     join_overlap: float = 0.2,
     join_corr: float = 0.7,
     return_cellprob: bool = False,
-    split=None,
 ) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     """Segment a fly. channels: (C, Z, Y, X). Returns (Z, Y, X) labels.
 
@@ -256,13 +255,10 @@ def predict(
     fly's grid, resampled bilinearly from the model's): logits, as ``cellprob_threshold`` is (its
     masks are of pixels over that), for `alseg.clean_margin.core`.
 
-    ``split``: a function of the planes' masks (each plane's its own) giving them with those over two
-    glomeruli split (`alseg.clean_trim.split`), before they are joined (so only with ``responses``).
-
     Returns:
         the labels, or (labels, cell probability map) with ``return_cellprob``.
     """
-    from cellpose import models, utils
+    from cellpose import models
 
     model = models.CellposeModel(gpu=gpu, pretrained_model=str(model_path))
     native = channels.shape[2:]
@@ -278,10 +274,7 @@ def predict(
         # each plane on its own (no minimum size yet, as when Cellpose stitches: it is of the objects)
         masks, flows, _ = model.eval(stack, z_axis=None, stitch_threshold=0.0, min_size=-1, **kw)
         masks = resize_xy(np.asarray(masks).reshape(stack.shape[:3]).astype(np.int32), native, 0)
-        if split is not None:
-            masks = split(masks)
-        masks = join_planes(masks, responses, join_overlap, join_corr)
-        masks = utils.fill_holes_and_remove_small_masks(masks, min_size=15)
+        masks = rejoin(masks, responses, "tuning", join_overlap, join_corr)
     if dilate:
         from skimage.segmentation import expand_labels
 
@@ -290,6 +283,30 @@ def predict(
         prob = np.asarray(flows[2], np.float32).reshape(stack.shape[:3])
         return masks, resize_xy(prob, native, 1)
     return masks
+
+
+def rejoin(masks: np.ndarray, responses: np.ndarray | None, join: str = "tuning", join_overlap: float = 0.2,
+           join_corr: float = 0.7, stitch_threshold: float = 0.25) -> np.ndarray:
+    """Joins each plane's masks ((Z, Y, X); each plane's own labels, or labels joined already, each in-plane mask
+    of which is then taken on its own) into 3D objects, as `predict` does: by ``join`` "tuning" (`join_planes`, with
+    ``join_overlap`` and ``join_corr``, by the fly's ``responses``) or "cellpose" (Cellpose's stitching, by IoU >=
+    ``stitch_threshold``); then with holes filled, and objects of under 15 voxels dropped, as Cellpose leaves them.
+    Masks changed since they were joined (`alseg.clean_trim.split`'s parts) are joined so again."""
+    from cellpose import utils
+
+    masks = np.asarray(masks)
+    if join == "tuning":
+        if responses is None:
+            raise ValueError("joining planes by tuning needs the fly's responses")
+        masks = join_planes(masks, responses, join_overlap, join_corr)
+    elif join == "cellpose":
+        from skimage.segmentation import relabel_sequential
+
+        planes = np.stack([relabel_sequential(m)[0] for m in masks]).astype(np.int32)  # (stitch3D takes each plane's own)
+        masks = utils.stitch3D(planes, stitch_threshold=stitch_threshold)
+    else:
+        raise ValueError(f"join {join!r}: not 'tuning' or 'cellpose'")
+    return utils.fill_holes_and_remove_small_masks(np.asarray(masks, np.int32), min_size=15)
 
 
 def join_planes(masks: np.ndarray, responses: np.ndarray, min_overlap: float = 0.2, min_corr: float = 0.7) -> np.ndarray:
