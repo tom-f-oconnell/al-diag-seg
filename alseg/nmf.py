@@ -330,8 +330,11 @@ def find(labels: np.ndarray, fly: dict, movies: dict | None = None, gpu: bool | 
         ``kind`` ("added", "extended", "split"), ``label`` (in the labels returned), ``of`` (the ROI
         it is more of, or cut from; else None), ``planes``, ``area_um2`` (of all its planes) and
         what it was taken by: ``eta2`` and ``novelty`` (the least of its planes'), or of a part cut
-        off, ``corr`` (of its and the rest's mean evidence); ``planes``: those factorized, and
-        ``params``.
+        off, ``corr`` (of its and the rest's mean evidence); ``planes``: those factorized,
+        ``params``, and ``rois``: of each in-plane mask of ``labels`` on those planes (``label``,
+        ``z``), the same measures as a candidate is taken by (``area_um2``, ``radius_um``, ``eta2``,
+        ``novelty`` against the other ROIs near it), to test the ROIs themselves by: with ``n_free``
+        0 nothing is factorized, and those are all it gives (and the masks cut, with ``split``).
 
     Raises:
         ValueError: for a parameter that is not one, or a fly with no movie to read.
@@ -353,7 +356,7 @@ def find(labels: np.ndarray, fly: dict, movies: dict | None = None, gpu: bool | 
     um = lambda k: p[k] / px  # noqa: E731
     min_px = max(1, int(round(p["min_area_um2"] / px ** 2)))
     hull = hulls(labels)
-    found, traces, planes = [], {}, []
+    found, traces, planes, rois = [], {}, [], []
     for z, plane in enumerate(labels):
         labs = [int(l) for l in np.unique(plane) if l]
         if len(labs) >= max(1, p["min_masks"]) and hull[z].any():
@@ -367,13 +370,21 @@ def find(labels: np.ndarray, fly: dict, movies: dict | None = None, gpu: bool | 
             X = _blur(D, um("sigma_um")).reshape(len(D), -1).T.contiguous()
             del D
             masks = np.stack([pl == l for l in labs])
-            A, C = _factorize(X, pl.shape, masks, hl & (ndi.distance_transform_edt(pl == 0) >= um("seed_gap_um")), pl == 0,
-                              p["n_free"], um("seed_um"), um("win_um"), um("reach_um"), p["iters"])
             mean = lambda m: X[torch.as_tensor(np.flatnonzero(m.ravel()), device=dev)].mean(0).cpu().numpy()  # noqa: E731
             for l, m in zip(labs, masks):
                 traces[l, z] = mean(m)
             tunings = {l: trials.tuning(traces[l, z]) for l in labs}
-            for m in _places(A, C, len(labs), pl, p["theta"], um("open_um"), min_px):
+            for l, m in zip(labs, masks):  # (the ROIs' own masks by the same tests)
+                near = ndi.distance_transform_edt(~m) <= um("near_um")
+                rois.append({"label": l, "z": z, "area_um2": float(m.sum() * px ** 2), "radius_um": float(ndi.distance_transform_edt(m).max() * px),
+                             "eta2": trials.eta2(traces[l, z]),
+                             "novelty": _novelty(tunings[l], [tunings[k] for k, q in zip(labs, masks) if k != l and (q & near).any()])})
+            places = []
+            if p["n_free"] > 0:
+                A, C = _factorize(X, pl.shape, masks, hl & (ndi.distance_transform_edt(pl == 0) >= um("seed_gap_um")), pl == 0,
+                                  p["n_free"], um("seed_um"), um("win_um"), um("reach_um"), p["iters"])
+                places = _places(A, C, len(labs), pl, p["theta"], um("open_um"), min_px)
+            for m in places:
                 trace = mean(m)
                 near = ndi.distance_transform_edt(~m) <= um("near_um")
                 full = np.zeros(plane.shape, bool)
@@ -414,7 +425,7 @@ def find(labels: np.ndarray, fly: dict, movies: dict | None = None, gpu: bool | 
                       "planes": sorted({c["z"] for c in cs}), "area_um2": float(sum(c["area_um2"] for c in cs)),
                       **({"corr": cs[0]["corr"]} if kind == "split" else
                          {"eta2": float(min(c["eta2"] for c in cs)), "novelty": float(min(c["novelty"] for c in cs))})})
-    return {"labels": out, "candidate": cand, "candidates": cands, "planes": planes, "params": p}
+    return {"labels": out, "candidate": cand, "candidates": cands, "planes": planes, "params": p, "rois": rois}
 
 
 def subset(labels: np.ndarray, merged: np.ndarray, candidate: np.ndarray, chosen) -> np.ndarray:

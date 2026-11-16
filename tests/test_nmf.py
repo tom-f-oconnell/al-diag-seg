@@ -91,6 +91,9 @@ def test_find_nothing():
     assert nmf.find(missing(lab), {"spacing": SPACING}, mv, gpu=False, split=False)["candidates"] == []
     mv, _ = movies(lab)
     assert nmf.find(lab, {"spacing": SPACING}, mv, gpu=False, split=False)["candidates"] == []
+    # without the factorization: the ROIs' own masks by the same tests, and no candidate
+    res = nmf.find(missing(lab), {"spacing": SPACING}, mv, gpu=False, split=False, n_free=0)
+    assert res["candidates"] == [] and len(res["rois"]) == 4 * 3 - 1 and all(r["eta2"] > 0.8 and r["novelty"] > 0.8 and r["radius_um"] >= 3.5 for r in res["rois"])
     two = np.where(lab <= 2, lab, 0)
     res = nmf.find(two, {"spacing": SPACING}, mv, gpu=False, split=False)
     assert res["candidates"] == [] and res["planes"] == []
