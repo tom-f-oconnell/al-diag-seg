@@ -55,8 +55,47 @@ On the synthetic data (`make_synthetic.py`, which samples flies like this):
    mirrored, and kept the way with the better mutual information. On five of Tom's flies
    the better way scored about twice the other.
 
+7. **The atlas on a fly's grid is then moved to where the fly's ROIs say its glomeruli
+   are** (`alseg/align.py`, `Model.align`, `--align`). Registering images leaves the atlas
+   off by an affine map, most of it along z (the README has the measurements):
+   - *What it is fit to.* ROIs that say where a glomerulus is in this fly: their centres
+     of mass, against the centres of mass of the atlas' maps on the fly's grid, as the
+     position term of naming compares them. For an affine map, the ROIs that odor tuning
+     alone names (one to one, where the tunings correlate by 0.7), wherever they are. The
+     ROIs named with the atlas as registered are those near where it expects them: a map
+     fit to them falls short, and finds nothing where registration failed.
+   - *When tuning is not enough.* With fewer than 18 of the model's odors, tuning alone
+     names too many ROIs wrong (measured, by leaving odors out). Then, and where the map
+     is not one to believe (it would stretch the atlas over twofold) or there are under 5
+     such ROIs, the map is fit to the ROIs named with the atlas: a shift (the median
+     offset), the ROIs named again, then the affine map.
+   - *How.* Reweighted least squares (Tukey's biweight), from the median offset: an ROI
+     named wrong is far from where the others put its glomerulus and gets no weight. The
+     linear part is held to the identity as by 5 more ROIs lying where expected, so few
+     ROIs move the atlas by little more than a shift.
+   - *What is kept.* `Model.predict` gives the moved atlas as the fly's (`prior`), with how
+     it was moved (`alignment`). What names ROIs later with a prediction's atlas (ROIs
+     split by `Model.refine`, ROIs `alseg.nmf` adds) uses it as it is, and does not fit it
+     again: every name of a fly is then given with one atlas.
+
 ### Alternatives
 
+* **Move the atlas inside naming, each time ROIs are named.** Nothing to keep, but each
+  set of a fly's ROIs (Cellpose's, those split, those with NMF's added) would then be named
+  with a slightly different atlas, and what shows a prediction's atlas would have to move it
+  again to show what the names were given with.
+* **A local warp of the atlas per fly** (a smooth field through the ROIs' offsets, on top
+  of the affine map). Measured: no better than the affine map alone, even fit to the
+  fly's manual ROIs (the README), and a field through ROIs named by the atlas pulls it
+  onto its own mistakes.
+* **Fit the map again to the names it gives, until they stop changing.** Each fit names
+  more ROIs, but right and wrong alike after the first affine one (on the database's fit 9,
+  fit to the ROIs named with the atlas: 851 glomeruli named right and 128 ROIs on another
+  after a shift and an affine map, 865 and 133 after one more), and what it converges to
+  depends on the names it started from.
+* **Fit the map to ROIs named under a looser `--max-cost`.** More ROIs to fit to, less
+  held to where the atlas expects them: better than the names found (874 right against
+  851), not as good as tuning alone (897), which does not look at the atlas at all.
 * **Resample everything to an isotropic grid first.** One grid for everything is the
   simplest code. But at ~10 µm between planes, 80–90% of the voxels would be
   interpolated, memory and time grow about 10×, the model would see interpolated planes

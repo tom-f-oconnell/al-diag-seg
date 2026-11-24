@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 import tifffile
 
+from . import align as align_mod
 from . import atlas as atlas_mod
 from . import clean, identity, metrics, refine, reference, responses, roi_io, segment
 
@@ -84,6 +85,11 @@ class Options:
     # the most naming an ROI as a glomerulus may cost (`identity.assign_identities`): an ROI none
     # costs less for is left unnamed (numbered); also for models saved before it was an option
     max_cost: float = 0.6
+    # the atlas on a fly's grid moved to where the fly's ROIs say its glomeruli are, and the ROIs named with it there
+    # (`Model.align`): by an "affine" map (fit to the ROIs that odor tuning alone names; else to those named with the
+    # atlas, after a shift), or by a "shift" (of those named with the atlas); None: left where registration put it.
+    # Also for models saved before it was an option
+    align: str | None = "affine"
     # masks over two glomeruli split by their tuning (`alseg.clean_trim.split`, with clean_params["split"]), and the
     # planes' masks joined again: the "split" kind, which the steps of ``clean`` then clean (`Model.refine`)
     split: bool = False
@@ -145,12 +151,21 @@ def write_identity_terms(path, terms: dict) -> None:
     Path(path).write_text(json.dumps(clean(terms), indent=1))
 
 
-def write_prior(path, prior: np.ndarray, names) -> None:
-    """A model's atlas on a fly's grid (`atlas.atlas_to_fly`: (glomeruli, Z, Y, X), each one's
+def write_prior(path, prior: np.ndarray, names, alignment: dict | None = None) -> None:
+    """A model's atlas on a fly's grid (`Model.predict`'s ``prior``: (glomeruli, Z, Y, X), each one's
     probability), with the glomeruli's ``names``, as a compressed .npz (``prior``, float16, and
     ``names``): what a fly's ROIs are named by, kept so that ROIs added later (`alseg.nmf`) are named
-    without registering the atlas again."""
-    np.savez_compressed(path, prior=np.asarray(prior, np.float16), names=np.array(list(names)))
+    without registering the atlas again. For an atlas moved to where the fly's ROIs say its glomeruli are, how
+    (``alignment``, `Model.predict`'s, as JSON: `read_alignment` reads it)."""
+    more = {} if alignment is None else {"alignment": np.array(json.dumps(alignment))}
+    np.savez_compressed(path, prior=np.asarray(prior, np.float16), names=np.array(list(names)), **more)
+
+
+def read_alignment(npz) -> dict | None:
+    """How the atlas of a `write_prior` file (opened with ``np.load``) was moved to where its fly's ROIs say its
+    glomeruli are (`Model.align`'s dict); None for one left where registration put it (or written before atlases
+    were moved)."""
+    return json.loads(str(npz["alignment"])) if "alignment" in npz.files else None
 
 
 def _purity(responses, labels, spacing, ref=None) -> dict:
@@ -287,6 +302,49 @@ class Model:
         return identity.assign_identities(fly["responses"], labels, self.template_of(fly), fly["spacing"], *args,
                                           max_cost=self.options.max_cost, return_terms=True, **kw)
 
+    def named_by_tuning(self, fly, labels) -> dict:
+        """{label: name or None}: each of a fly's ROIs as the glomerulus tuned most like it (one to one), where
+        that costs `alseg.align.TUNING_COST` at most (1 - the correlation of their odor tunings), wherever the ROI
+        is. Not what the ROIs are named: what an affine map of the atlas is fit to (`align`)."""
+        ids = identity.assign_identities(fly["responses"], labels, self.template_of(fly), fly["spacing"], w_position=0,
+                                         w_shape=0, w_layout=0, max_cost=align_mod.TUNING_COST)
+        return {l: v[0] for l, v in ids.items()}
+
+    def align(self, fly, labels, prior, identities, terms=None, prior_names=None):
+        """The atlas on a fly's grid as registered (``prior``, of the glomeruli ``prior_names``: the atlas' by
+        default) moved to where the fly's ROIs (``labels``) say its glomeruli are, and the ROIs named again with it
+        there, as `Options.align` asks:
+
+        - "affine": by an affine map fit to the ROIs that odor tuning alone names (`named_by_tuning`: wherever they
+          are, so the map is not held back by where the atlas expected them), in a fly with
+          `alseg.align.TUNING_ODORS` of the model's odors or more. With fewer odors, with too few such ROIs, or
+          where that map is not believed (`alseg.align.fit`), as below.
+        - else by a fit to the ROIs as named with the atlas (``identities``, at the costs ``terms``: `name`'s), in
+          the steps of `alseg.align.STEPS`: a shift, and for "affine" then an affine map, each a fit of the atlas
+          as registered to the ROIs as the step before named them.
+
+        Returns:
+            (the atlas moved, how, the ROIs' names with it, what they cost): how, `alseg.align.fit`'s dict of the
+            last fit, with ``rois_named_by`` ("tuning", or "atlas": which ROIs it was fit to); or (``prior``, None,
+            ``identities``, ``terms``) as they are if `Options.align` is None, or too few of the ROIs are named to
+            fit the atlas to.
+        """
+        kind, names = self.options.align, list(prior_names) if prior_names is not None else self.atlas.names
+        if not kind:
+            return prior, None, identities, terms
+        if kind == "affine" and len(self.fly_odors(fly)) >= align_mod.TUNING_ODORS:
+            m, a = align_mod.align(labels, self.named_by_tuning(fly, labels), prior, names, fly["spacing"], kind)
+            if a is not None and a["kind"] == kind:
+                return (m, {**a, "rois_named_by": "tuning"}, *self.name(fly, labels, m, names))
+        moved, how = prior, None
+        for step in align_mod.STEPS[kind]:
+            m, a = align_mod.align(labels, {l: v[0] for l, v in identities.items()}, prior, names, fly["spacing"], step)
+            if a is None:
+                break
+            moved, how = m, {**a, "rois_named_by": "atlas"}
+            identities, terms = self.name(fly, labels, moved, names)
+        return moved, how, identities, terms
+
     def predict(self, fly) -> dict:
         """Segments and names a fly: ``fly`` has ``average``, ``responses`` (in `odors`' order; or of
         those of them it has, ``odors``, in that order), ``spacing`` and optionally ``hires`` (its
@@ -302,10 +360,14 @@ class Model:
             `Options.split` and `Options.clean` ask (`refine`); and 'clean_<step>', each cleaning
             step alone on Cellpose's, split if that was asked for), ``identities``: for each,
             {label: (name or None, cost, confidence)}, ``identity_terms``: for each, what those
-            costs are made of (`identity.assign_identities`), ``final``: the kind to use,
+            costs are made of (`identity.assign_identities`; with ``alignment``, below, for the
+            kinds named with the atlas), ``final``: the kind to use,
             ``atlas_maxprob``: the atlas on the fly's grid (its largest probability), or None,
             ``prior``: the atlas there, each glomerulus' probability ((glomeruli, Z, Y, X), in
-            the order of the atlas' names), or None, ``cellprob``: Cellpose's cell probabilities
+            the order of the atlas' names), or None: as registration put it, then moved to where
+            Cellpose's ROIs say the fly's glomeruli are (`align`), which they are named again
+            by; ``alignment``: how it was moved (`align`'s dict; None if it was not:
+            `Options.align` None, or too few ROIs to fit it to), ``cellprob``: Cellpose's cell probabilities
             ((Z, Y, X) on the fly's grid; None for the stand-in segmenter), and ``report``: what
             cleaning did to each ROI (`refine`'s; None if none was asked for).
         """
@@ -327,11 +389,13 @@ class Model:
             ids[kind], terms[kind] = self.name(fly, labels[kind], *args)
 
         name("refined_tuning")
-        maxprob = prior = None
+        maxprob = prior = alignment = None
         if self.atlas is not None:
             prior = self.prior_of(fly)
             # name the raw prediction first so the prior knows which glomerulus each ROI is
             name("pred", prior)
+            # and where its glomeruli are in this fly: the atlas moved there, and the ROIs named again
+            prior, alignment, ids["pred"], terms["pred"] = self.align(fly, pred, prior, ids["pred"], terms["pred"])
             names0 = {l: v[0] for l, v in ids["pred"].items()}
             labels["refined_prior"] = refine.refine_with_prior(resp, pred, names0, prior, self.atlas.names, sp,
                                                                w_prior=o.w_prior)
@@ -354,8 +418,13 @@ class Model:
             left = set(np.unique(labels[kind]).tolist())
             ids[kind] = {l: v for l, v in ids[base].items() if l in left}
             terms[kind] = terms[base]
+        if prior is not None:
+            for kind in terms:
+                if kind != "refined_tuning":  # (named without the atlas)
+                    terms[kind]["alignment"] = alignment
         return {"labels": labels, "identities": ids, "identity_terms": terms, "atlas_maxprob": maxprob,
-                "prior": prior, "final": self.final_kind(), "cellprob": fly.get("cellprob"), "report": report}
+                "prior": prior, "alignment": alignment, "final": self.final_kind(), "cellprob": fly.get("cellprob"),
+                "report": report}
 
     def refine(self, fly, pred, identities, terms=None, prior=None, prior_names=None, split=None, steps=None,
                params=None) -> dict:
@@ -366,7 +435,8 @@ class Model:
         - ``split``: each in-plane mask over two glomeruli tuned unlike is cut in two
           (`alseg.clean_trim.split`, with ``params["split"]``), and the planes' masks are joined again,
           as the model joins them (`segment.rejoin`), and all named again (`name`: with the atlas on the
-          fly's grid, ``prior``, of the glomeruli ``prior_names``, if given). If none is cut, they are
+          fly's grid, ``prior``, of the glomeruli ``prior_names``, if given: as `predict` gave it, so
+          moved onto the fly's glomeruli already, and not moved again). If none is cut, they are
           left as they are.
         - then ``steps`` (of `alseg.clean.STEPS`, applied in that order, each with ``params[step]``),
           which only remove pixels, so names are kept. Those that cannot run on the fly (core, without
@@ -402,6 +472,8 @@ class Model:
             if rep["split"]:
                 base = segment.rejoin(cut, fly["responses"], o.join, o.join_overlap, o.join_corr)
                 base_ids, base_terms = self.name(fly, base, prior, prior_names)
+                if terms is not None and "alignment" in terms:  # (named with the atlas the model's own ROIs were)
+                    base_terms["alignment"] = terms["alignment"]
                 for lab, z in rep["split"]:
                     for part in np.unique(base[z][pred[z] == lab]):
                         if part:
@@ -442,9 +514,10 @@ class Model:
         Writes to ``out`` (if given), per fly: each kind's labels (``<fly>_<kind>.tif``) and
         RoiSet.zip, named (``<fly>_<kind>_RoiSet.zip``), its identities
         (``<fly>_identities_<kind>.csv``) and what their costs are made of
-        (``<fly>_identity_terms_<kind>.json``), the atlas on its grid (its largest probability;
-        with ``priors``, each glomerulus' too: ``<fly>_atlas_prior.npz``, `write_prior`); and
-        ``summary.csv``, ``glomeruli.csv``.
+        (``<fly>_identity_terms_<kind>.json``), the atlas on its grid, as moved to where its ROIs
+        say its glomeruli are (`predict`'s ``prior``: its largest probability; with ``priors``, each glomerulus' too, and
+        how it was moved: ``<fly>_atlas_prior.npz``, `write_prior`); and ``summary.csv``,
+        ``glomeruli.csv``.
 
         Returns:
             dict with ``summary`` (a row per fly and kind of ROIs: recall, precision and
@@ -456,7 +529,8 @@ class Model:
             purity, to compare with), ``identity`` (per fly and
             kind: ROIs named as the manual one they overlap, of those that overlap one),
             ``glomeruli`` (per glomerulus, over the flies: how many have it, in how many
-            the final ROIs detect it, mean Dice, named right), ``final`` and ``scoring``.
+            the final ROIs detect it, mean Dice, named right), ``alignment`` (per fly, by name:
+            how its atlas was moved, `predict`'s), ``final`` and ``scoring``.
 
         ``partly_drawn`` (``scoring``: "partly drawn", else "strict"): as glomeruli are often
         drawn on some of their planes only (their clearest), a predicted ROI's voxels on planes
@@ -467,17 +541,18 @@ class Model:
         out = Path(out) if out is not None else None
         if out:
             out.mkdir(parents=True, exist_ok=True)
-        rows, id_rows, per_glom = [], [], {}
+        rows, id_rows, per_glom, moved = [], [], {}, {}
         final = None
         for i, f in enumerate(flies):
             p = self.predict(f)
             final = p["final"]
             lut = f["lut"]
+            moved[f["name"]] = p["alignment"]
             if out:
                 if p["atlas_maxprob"] is not None:
                     write_volume(out / f"{f['name']}_atlas_maxprob.tif", p["atlas_maxprob"])
                     if priors:
-                        write_prior(out / f"{f['name']}_atlas_prior.npz", p["prior"], self.atlas.names)
+                        write_prior(out / f"{f['name']}_atlas_prior.npz", p["prior"], self.atlas.names, p["alignment"])
             rows.append(manual_row(f))
             # (cleaned ROIs keep the labels of those they were cleaned from: Cellpose's, split if that was asked for)
             base = p["labels"].get("split", p["labels"]["pred"])
@@ -525,7 +600,7 @@ class Model:
                 w.writerows(glom)
         plain = lambda v: float(v) if isinstance(v, (float, np.floating)) else v  # noqa: E731
         return {"summary": [{k: plain(v) for k, v in r.items()} for r in rows], "identity": id_rows, "glomeruli": glom,
-                "final": final, "scoring": "partly drawn" if partly_drawn else "strict"}
+                "alignment": moved, "final": final, "scoring": "partly drawn" if partly_drawn else "strict"}
 
 
 def manual_row(fly) -> dict:

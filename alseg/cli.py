@@ -49,15 +49,18 @@ Tom_2023-11-19_1 (as --val takes them).
 Steps: ROIs -> labels; response channels; Cellpose fine-tune (on every ROI outlining one
 glomerulus, named or not); then for each held-out fly: predict, refine by tuning alone, and
 (unless --no-atlas) refine with an atlas prior from a probabilistic atlas of the training
-flies, and name ROIs using tuning + position + shape + layout + atlas. The ROIs to use are
-Cellpose's own, named (--final refined: the refined ones).
+flies, and name ROIs using tuning + position + shape + layout + atlas. The atlas on a fly's
+grid is first moved to where its ROIs say its glomeruli are, and they are named with it
+there (--align). The ROIs to use are Cellpose's own, named (--final refined: the refined
+ones).
 
 Writes to --out: the model, model/ (everything a new fly is segmented and named with:
 run it on your own flies with alseg-predict); per held-out fly, each kind of ROIs
 (pred: Cellpose's; refined_tuning; refined_prior) as labels, <fly>_<kind>.tif, and as an
-ImageJ RoiSet named by glomerulus, <fly>_<kind>_RoiSet.zip; <fly>_atlas_maxprob.tif;
-<fly>_identities_<kind>.csv and <fly>_identity_terms_<kind>.json (what each name cost: see
---max-cost); and summary.csv (one row per fly and kind of ROIs: matched to
+ImageJ RoiSet named by glomerulus, <fly>_<kind>_RoiSet.zip; <fly>_atlas_maxprob.tif (the
+atlas on its grid, as moved: --align); <fly>_identities_<kind>.csv and
+<fly>_identity_terms_<kind>.json (what each name cost: see --max-cost; and how the atlas
+was moved, alignment); and summary.csv (one row per fly and kind of ROIs: matched to
 the manual ROIs as 3D objects, and plane by plane, *_2d),
 glomeruli.csv (per glomerulus: in how many held-out flies it was found and named right),
 name_table.json, and Cellpose's own files under models/.
@@ -167,6 +170,27 @@ def _max_cost_arg(g, fit: bool) -> None:
                         + ("" if fit else f". Default: the model's (models saved without it: {d})"))
 
 
+def _align_arg(g, fit: bool) -> None:
+    """How a fly's atlas is moved to where its ROIs say its glomeruli are (`alseg.align`): an option of a model fit
+    (saved with it), or of a prediction."""
+    from .align import KINDS
+
+    d = Options().align or "none"
+    g.add_argument("--align", choices=[*KINDS, "none"], default=d if fit else None,
+                   help="move the atlas on each fly's grid to where the fly's ROIs say its glomeruli are, and name "
+                        "them with it there: registration leaves the atlas some um off, most along z. By an affine map "
+                        "(also scale, tilt and shear), fit to the ROIs that odor tuning alone names, wherever they are "
+                        "(in a fly with too few odors for that: to the ROIs named with the atlas, after a shift); or "
+                        "by a shift, of the ROIs named with the atlas. Either is fit whatever a few wrong names say; "
+                        "none: the atlas as registered. <fly>_identity_terms*.json has how it was "
+                        "moved (alignment)" + ("" if fit else f". Default: the model's (models saved without it: {d})"))
+
+
+def _set_align(o, a) -> None:
+    if a.align is not None:
+        o.align = None if a.align == "none" else a.align
+
+
 def _parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=FIT_DOC, epilog=EXAMPLES, formatter_class=_HelpFormatter)
     ap.add_argument("data", type=Path,
@@ -228,6 +252,7 @@ def _parser() -> argparse.ArgumentParser:
                         "final ones): Cellpose's own, named (pred); or refined by odor tuning and the atlas "
                         "(refined: on real flies, this shrank and broke up Cellpose's ROIs)")
     _max_cost_arg(g, fit=True)
+    _align_arg(g, fit=True)
     _clean_args(g, fit=True)
     g.add_argument("--w-prior", type=float, default=0.5, metavar="W",
                    help="weight of the atlas prior relative to odor tuning in refinement. Higher "
@@ -310,6 +335,7 @@ def fit_main(argv=None):
                     tentative=not a.no_tentative, gpu=False if a.cpu else None, segmenter=a.segmenter, final=a.final,
                     max_cost=a.max_cost,
                     **{k: getattr(a, k) for k in MASK_OPTIONS})
+        _set_align(o, a)
         _set_clean(o, a)
         model = fit(flies, a.val, o, out=a.out, odors=data["odors"], aliases=data["aliases"], glomeruli=data["glomeruli"],
                     weights=a.model if a.skip_train else None)
@@ -337,7 +363,8 @@ Writes to --out, per fly: <fly>_RoiSet.zip, its ROIs named by glomerulus (number
 fits), for ImageJ and al_analysis; each kind of ROIs as labels, <fly>_<kind>.tif (pred:
 Cellpose's; refined_tuning; refined_prior, with the atlas) and as a RoiSet,
 <fly>_<kind>_RoiSet.zip; <fly>_identities.csv, and what each name cost,
-<fly>_identity_terms.json (see --max-cost). Flies with ROIs of their own (RoiSet.zip)
+<fly>_identity_terms.json (see --max-cost; with how the atlas was moved to where the fly's
+ROIs say its glomeruli are, before they were named with it: --align). Flies with ROIs of their own (RoiSet.zip)
 are also scored against them (summary.csv, glomeruli.csv, as alseg-fit's).
 """
 
@@ -369,6 +396,7 @@ def predict_main(argv=None):
     ap.add_argument("--cpu", action="store_true", help="run Cellpose on the CPU (slower) even if there is a GPU")
     _mask_args(ap, fit=False)
     _max_cost_arg(ap, fit=False)
+    _align_arg(ap, fit=False)
     _clean_args(ap, fit=False)
     a = ap.parse_args(argv)
     if not (a.model / "model.json").is_file():
@@ -385,6 +413,7 @@ def predict_main(argv=None):
             setattr(model.options, k, getattr(a, k))
     if a.max_cost is not None:
         model.options.max_cost = a.max_cost
+    _set_align(model.options, a)
     _set_clean(model.options, a)
     if a.export:
         data = olfdb.load_export(a.export, tentative=model.options.tentative)
